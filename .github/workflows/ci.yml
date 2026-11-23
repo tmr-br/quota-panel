@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux amd64
+            runner: ubuntu-latest
+            go_file: go.mod
+          - platform: macOS arm64
+            runner: macos-latest
+            go: stable
+          - platform: macOS amd64
+            runner: macos-15-intel
+            go: stable
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: ${{ matrix.go_file }}
+          go-version: ${{ matrix.go }}
+
+      - name: Check Go formatting
+        if: runner.os == 'Linux'
+        run: |
+          gofmt -w .
+          git diff --exit-code
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Test with race detector
+        if: runner.os == 'Linux'
+        env:
+          CGO_ENABLED: '1'
+        run: go test -race -count=1 ./...
+
+      - name: Build and render demo
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/trofeo-quota" .
+          "$RUNNER_TEMP/trofeo-quota" -demo -preview "$RUNNER_TEMP/demo.png"
+          test -s "$RUNNER_TEMP/demo.png"

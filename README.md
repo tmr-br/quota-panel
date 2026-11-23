@@ -1,5 +1,7 @@
 # quota-panel
 
+[![CI](https://github.com/tmr-br/quota-panel/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tmr-br/quota-panel/actions/workflows/ci.yml)
+
 Thermalright Trofeo Vision 9.16 インチ用の利用枠ダッシュボード。macOS と Linux で動く Go の単一実行ファイルです。左から Claude Code、Codex、Antigravity、OpenCode Go を表示します。取得は既定で 5 分ごとです。
 
 ## 実機で最初の 1 枚を表示
