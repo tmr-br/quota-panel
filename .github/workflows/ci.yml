@@ -63,5 +63,8 @@ jobs:
       - name: Build and render demo
         run: |
           go build -trimpath -o "$RUNNER_TEMP/trofeo-quota" .
-          "$RUNNER_TEMP/trofeo-quota" -demo -preview "$RUNNER_TEMP/demo.png"
+          "$RUNNER_TEMP/trofeo-quota" -config trofeo.toml -check-config
+          "$RUNNER_TEMP/trofeo-quota" -demo -preview-size 1920x462 -preview "$RUNNER_TEMP/demo.png"
+          "$RUNNER_TEMP/trofeo-quota" -demo -status json > "$RUNNER_TEMP/status.json"
+          python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); assert s["demo"] and len(s["groups"]) == 4' "$RUNNER_TEMP/status.json"
           test -s "$RUNNER_TEMP/demo.png"

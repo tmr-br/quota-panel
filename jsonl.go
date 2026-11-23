@@ -10,17 +10,24 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
-// Cache just the decoded usage records. Prompt text is never retained. A
-// changed/replaced file is decoded again; a failed read never enters the cache.
+// Cache decoded usage records or a parse failure for this exact file version.
+// Changed/replaced files are decoded again. I/O errors are always retried.
 type logFile[T any] struct {
-	info    os.FileInfo
-	records []T
+	info      os.FileInfo
+	records   []T
+	malformed error
 }
 type logCache[T any] map[string]logFile[T]
+type logParser[T any] func(path string, line []byte) (T, bool, error)
 
-func (cache logCache[T]) read(ctx context.Context, root string, parse func([]byte) (T, bool, error)) ([]T, error) {
+func (cache logCache[T]) read(ctx context.Context, root string, parse logParser[T]) ([]T, error) {
+	return cache.readReportingMalformed(ctx, root, parse, nil)
+}
+
+func (cache logCache[T]) readReportingMalformed(ctx context.Context, root string, parse logParser[T], report func(time.Time, error)) ([]T, error) {
 	dir, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil, err
@@ -50,6 +57,13 @@ func (cache logCache[T]) read(ctx context.Context, root string, parse func([]byt
 			}
 			cache[path] = file
 		}
+		if file.malformed != nil {
+			if report == nil {
+				return file.malformed
+			}
+			report(file.info.ModTime(), file.malformed)
+			return nil
+		}
 		all = append(all, file.records...)
 		return nil
 	})
@@ -64,7 +78,7 @@ func (cache logCache[T]) read(ctx context.Context, root string, parse func([]byt
 	return all, nil
 }
 
-func readLog[T any](ctx context.Context, path string, parse func([]byte) (T, bool, error)) (logFile[T], error) {
+func readLog[T any](ctx context.Context, path string, parse logParser[T]) (logFile[T], error) {
 	var result logFile[T]
 	f, err := os.Open(path)
 	if err != nil {
@@ -75,8 +89,7 @@ func readLog[T any](ctx context.Context, path string, parse func([]byte) (T, boo
 	if err != nil {
 		return result, err
 	}
-	// Ignore bytes appended after this snapshot. A torn JSON record makes the
-	// source unavailable for this poll and is retried once its writer finishes.
+	// Decode only the bytes belonging to the recorded snapshot.
 	scan := bufio.NewScanner(io.LimitReader(f, result.info.Size()))
 	scan.Buffer(make([]byte, 64<<10), 64<<20)
 	for line := 1; scan.Scan(); line++ {
@@ -87,9 +100,11 @@ func readLog[T any](ctx context.Context, path string, parse func([]byte) (T, boo
 		if len(raw) == 0 {
 			continue
 		}
-		v, relevant, err := parse(raw)
+		v, relevant, err := parse(path, raw)
 		if err != nil {
-			return result, fmt.Errorf("%s:%d: %w", path, line, err)
+			result.records = nil
+			result.malformed = fmt.Errorf("%s:%d: %w", path, line, err)
+			return result, nil
 		}
 		if relevant {
 			result.records = append(result.records, v)

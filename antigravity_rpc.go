@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,8 +20,10 @@ import (
 )
 
 type localEndpoint struct {
-	port          int
+	pid           int
+	addr          netip.AddrPort
 	scheme, token string
+	advertised    bool
 }
 
 func languageServerName(path string) bool {
@@ -27,105 +31,194 @@ func languageServerName(path string) bool {
 	return n == "language_server" || strings.HasPrefix(n, "language_server_")
 }
 
-// First enumerate only executable names for the current user. Read argv only
-// for matching language servers. Never put argv or tokens in errors/logs.
+// Enumerate executable names first. Read argv only for current-user language
+// servers and never include argv or tokens in diagnostics.
 func languageEndpoints(ctx context.Context) ([]localEndpoint, error) {
 	uid := strconv.Itoa(os.Getuid())
 	b, err := commandOutput(ctx, 4*time.Second, "ps", "-ww", "-U", uid, "-o", "pid=,comm=")
 	if err != nil {
 		return nil, err
 	}
-	var endpoints []localEndpoint
-	var failures []error
+	var serverPID int
+	var flags map[string]string
 	for _, line := range strings.Split(string(b), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 2 || !languageServerName(strings.Join(fields[1:], " ")) {
+		if len(fields) < 2 {
 			continue
 		}
 		pid, err := strconv.Atoi(fields[0])
 		if err != nil || pid <= 0 {
 			continue
 		}
-		args, err := commandOutput(ctx, 3*time.Second, "ps", "-ww", "-p", fields[0], "-o", "uid=,args=")
-		if err != nil {
-			failures = append(failures, err)
+		exe := strings.Join(fields[1:], " ")
+		var f map[string]string
+		switch {
+		case languageServerName(exe):
+			args, err := commandOutput(ctx, 3*time.Second, "ps", "-ww", "-p", fields[0], "-o", "uid=,args=")
+			if err != nil {
+				return nil, fmt.Errorf("cannot establish language server identity: %w", err)
+			}
+			words := strings.Fields(string(args))
+			if len(words) < 2 || words[0] != uid {
+				continue
+			}
+			f = antigravityFlags(words[1:])
+			if f == nil {
+				continue
+			}
+		case filepath.Base(exe) == "agy" || filepath.Base(exe) == "antigravity-cli" || filepath.Base(exe) == "antigravity_cli":
+			match, err := matchesInstalledAgy(ctx, pid, exe)
+			if err != nil {
+				return nil, fmt.Errorf("cannot verify running agy: %w", err)
+			}
+			if !match {
+				continue
+			}
+			// A matched CLI uses anonymous RPC. Never read its arguments or
+			// attach credentials, even if its listener asks for them.
+		default:
 			continue
 		}
-		words := strings.Fields(string(args))
-		if len(words) < 2 || words[0] != uid {
-			continue
+		if serverPID != 0 && serverPID != pid {
+			return nil, errors.New("multiple Antigravity language servers: cannot identify the active account")
 		}
-		endpoints = append(endpoints, endpointsFromArgs(words[1:])...)
+		serverPID, flags = pid, f
 	}
-	if len(endpoints) == 0 {
-		return nil, errors.Join(append(failures, errors.New("no running Antigravity language server with a local port and CSRF token in argv"))...)
+	if serverPID == 0 || (flags != nil && flags["csrf_token"] == "") {
+		return nil, errors.New("no verified running agy or authenticated Antigravity language server")
 	}
-	return endpoints, nil
+	owned, err := antigravityListeners(ctx, serverPID)
+	if err != nil {
+		return nil, err
+	}
+	eps := languageServerEndpoints(serverPID, flags, owned)
+	if len(eps) == 0 {
+		return nil, errors.New("no verified Antigravity language server loopback listener")
+	}
+	return eps, nil
 }
 
-func endpointsFromArgs(args []string) []localEndpoint {
-	identity := strings.ToLower(strings.Join(args, " "))
-	if !strings.Contains(identity, "antigravity") && !strings.Contains(identity, "/gemini.app/") {
-		return nil
-	}
+func antigravityFlags(args []string) map[string]string {
+	firstFlag := len(args)
 	flags := map[string]string{}
 	for i, arg := range args {
 		if !strings.HasPrefix(arg, "--") {
 			continue
 		}
+		firstFlag = min(firstFlag, i)
 		k, v, found := strings.Cut(arg, "=")
 		if !found && i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
 			v = args[i+1]
 		}
 		flags[strings.ReplaceAll(k[2:], "-", "_")] = v
 	}
-	var out []localEndpoint
-	for _, candidate := range []struct {
-		key     string
-		schemes []string
-	}{
-		{"https_port", []string{"https"}}, {"http_port", []string{"http"}},
-		{"language_server_port", []string{"https", "http"}}, {"server_port", []string{"https", "http"}},
-		{"port", []string{"https", "http"}}, {"extension_server_port", []string{"http", "https"}},
-	} {
-		port, err := strconv.Atoi(flags[candidate.key])
-		if err != nil || port < 1 || port > 65535 {
-			continue
+	exe := strings.Join(args[:firstFlag], " ")
+	if !languageServerName(exe) {
+		return nil
+	}
+	for _, component := range strings.Split(strings.ToLower(exe), "/") {
+		switch component {
+		case "antigravity", "antigravity-ide", "antigravity.app", "antigravity ide.app", "gemini.app":
+			return flags
 		}
-		token := flags["csrf_token"]
-		if candidate.key == "extension_server_port" && flags["extension_server_csrf_token"] != "" {
-			token = flags["extension_server_csrf_token"]
+	}
+	switch strings.ToLower(filepath.Base(flags["app_data_dir"])) {
+	case "antigravity", "antigravity-ide":
+		return flags
+	}
+	return nil
+}
+
+func languageServerEndpoints(pid int, flags map[string]string, owned []netip.AddrPort) []localEndpoint {
+	var advertised, dynamic []localEndpoint
+	for _, addr := range owned {
+		port := strconv.Itoa(int(addr.Port()))
+		if port == flags["extension_server_port"] {
+			continue // IDE callback uses a different service and credential.
 		}
-		if token == "" {
-			continue
+		schemes := []string{"https", "http"}
+		explicit := false
+		switch port {
+		case flags["https_port"]:
+			schemes, explicit = []string{"https"}, true
+		case flags["http_port"]:
+			schemes, explicit = []string{"http"}, true
 		}
-		for _, scheme := range candidate.schemes {
-			ep := localEndpoint{port, scheme, token}
-			if !slices.Contains(out, ep) {
-				out = append(out, ep)
+		for _, scheme := range schemes {
+			ep := localEndpoint{pid: pid, addr: addr, scheme: scheme, token: flags["csrf_token"], advertised: explicit}
+			if explicit {
+				advertised = append(advertised, ep)
+			} else {
+				dynamic = append(dynamic, ep)
 			}
 		}
 	}
-	return out
+	return append(advertised, dynamic...)
 }
 
 const rpcPrefix = "/exa.language_server_pb.LanguageServerService/"
 
 func rpcCall(ctx context.Context, client *http.Client, ep localEndpoint, method, body string) ([]byte, error) {
-	target := fmt.Sprintf("%s://127.0.0.1:%d%s%s", ep.scheme, ep.port, rpcPrefix, method)
+	target := ep.scheme + "://" + ep.addr.String() + rpcPrefix + method
+	if ep.token != "" && !ep.advertised {
+		// A process can also own listeners for unrelated services. Try the
+		// read-only Connect method without credentials. Only a CSRF challenge
+		// at this method authorizes retrying with the language server token.
+		raw, err := doRPC(ctx, client, target, method, body, "")
+		if !errors.Is(err, errCSRFRequired) {
+			return raw, err
+		}
+	}
+	return doRPC(ctx, client, target, method, body, ep.token)
+}
+
+var errCSRFRequired = errors.New("language server requires CSRF token")
+
+// Only retry a dynamic listener on an explicit CSRF authentication failure.
+// Generic HTTP errors and login forms must never prompt credential delivery.
+func csrfChallenge(raw []byte) bool {
+	message := strings.ToLower(strings.TrimSpace(string(raw)))
+	if strings.HasPrefix(message, "{") {
+		var failure struct{ Code, Message string }
+		if json.Unmarshal(raw, &failure) != nil || (failure.Code != "unauthenticated" && failure.Code != "permission_denied" && failure.Code != "invalid_argument") {
+			return false
+		}
+		message = strings.ToLower(strings.TrimSpace(failure.Message))
+	}
+	switch message {
+	case "invalid csrf token", "missing csrf token", "csrf token required",
+		"invalid x-codeium-csrf-token", "missing x-codeium-csrf-token",
+		"missing x-codeium-csrf-token header", "invalid x-codeium-csrf-token header":
+		return true
+	}
+	return false
+}
+
+func doRPC(ctx context.Context, client *http.Client, target, method, body, token string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", target, strings.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Connect-Protocol-Version", "1")
-	req.Header.Set("X-Codeium-Csrf-Token", ep.token)
+	if token != "" {
+		req.Header.Set("X-Codeium-Csrf-Token", token)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
+		if token == "" && (resp.StatusCode == 400 || resp.StatusCode == 401 || resp.StatusCode == 403) {
+			challenge, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			if err != nil {
+				return nil, err
+			}
+			if csrfChallenge(challenge) {
+				return nil, errCSRFRequired
+			}
+		}
 		return nil, fmt.Errorf("%s: HTTP %d", method, resp.StatusCode)
 	}
 	const max = 2 << 20
@@ -220,10 +313,34 @@ func fetchRPC(ctx context.Context, keys []string, now time.Time) (readings, erro
 }
 
 func queryEndpoints(ctx context.Context, endpoints []localEndpoint, keys []string, now time.Time) (readings, error) {
-	// Antigravity issues a self-signed certificate on its local HTTPS port.
-	// This transport has no proxy, never redirects and is only used with the
-	// literal loopback address and a port advertised by the user's server.
-	transport := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	if len(endpoints) == 0 {
+		return nil, errors.New("no Antigravity language server")
+	}
+	pid := endpoints[0].pid
+	for _, ep := range endpoints {
+		if ep.pid != pid || !ep.addr.Addr().IsLoopback() {
+			return nil, errors.New("ambiguous or non-loopback Antigravity server")
+		}
+	}
+	// Self-signed local TLS. Check ownership again *after* dialing and before
+	// sending HTTP (including tokens), in case a process exited or rebound.
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			var dialer net.Dialer
+			conn, err := dialer.DialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			listeners, err := antigravityListeners(ctx, pid)
+			peer := conn.RemoteAddr().(*net.TCPAddr).AddrPort()
+			if err != nil || !slices.Contains(listeners, netip.AddrPortFrom(peer.Addr().Unmap(), peer.Port())) {
+				conn.Close()
+				return nil, errors.Join(errors.New("Antigravity listener ownership changed"), err)
+			}
+			return conn, nil
+		},
+	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Timeout: 3 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	var last error

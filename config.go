@@ -16,7 +16,9 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-//go:embed trofeo.toml
+// Embed the shipping defaults, independently of the user-editable working config.
+//
+//go:embed assets/default.toml
 var defaultTOML []byte
 
 type selection struct {
@@ -39,19 +41,23 @@ type codexConfig struct {
 
 type openConfig struct {
 	Enabled   bool              `toml:"enabled"`
+	Account   string            `toml:"account"`
 	Models    []string          `toml:"models"`
 	ModelRows map[string]string `toml:"model_rows"`
 }
 
 type config struct {
-	Interval    int          `toml:"interval_seconds"`
-	TrccURL     string       `toml:"trcc_url"`
-	DeviceKey   string       `toml:"device_key"`
-	Order       []string     `toml:"display_order"`
-	Claude      claudeConfig `toml:"claude"`
-	Codex       codexConfig  `toml:"codex"`
-	Antigravity selection    `toml:"antigravity"`
-	OpenCode    openConfig   `toml:"opencode"`
+	fromFile    bool
+	Display     displayConfig  `toml:"display"`
+	Insights    insightsConfig `toml:"insights"`
+	Interval    int            `toml:"interval_seconds"`
+	TrccURL     string         `toml:"trcc_url"`
+	DeviceKey   string         `toml:"device_key"`
+	Order       []string       `toml:"display_order"`
+	Claude      claudeConfig   `toml:"claude"`
+	Codex       codexConfig    `toml:"codex"`
+	Antigravity selection      `toml:"antigravity"`
+	OpenCode    openConfig     `toml:"opencode"`
 }
 
 func readConfig(path string) (config, error) {
@@ -69,6 +75,10 @@ func readConfig(path string) (config, error) {
 	b, err := os.ReadFile(path)
 	switch {
 	case err == nil:
+		if len(bytes.TrimSpace(b)) == 0 {
+			return c, fmt.Errorf("%s: empty configuration", path)
+		}
+		c.fromFile = true
 		if err := decode(b); err != nil {
 			return c, fmt.Errorf("%s: %w", path, err)
 		}
@@ -116,7 +126,20 @@ func readConfig(path string) (config, error) {
 			seen[item] = true
 		}
 	}
+	if err := c.Display.validate(); err != nil {
+		return c, err
+	}
+	if err := c.Insights.validate(); err != nil {
+		return c, err
+	}
 	return c, nil
+}
+
+func (c config) reload(path string) (config, error) {
+	if path == "" && c.fromFile {
+		path = "trofeo.toml"
+	}
+	return readConfig(path)
 }
 
 func logPath(override, env, fallback, leaf string) (string, error) {

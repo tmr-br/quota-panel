@@ -1,0 +1,39 @@
+# quota-panel の既定値。各キーの意味と設定例は README を参照してください。
+interval_seconds = 300
+trcc_url = "http://localhost:9876"
+device_key = ""
+display_order = ["claude", "codex", "antigravity", "opencode"]
+
+[claude]
+enabled = true
+items = ["5h", "week"]
+projects_dir = ""
+five_hour_tokens = 0
+weekly_tokens = 0
+weekly_reset_anchor = ""
+
+[codex]
+enabled = true
+items = ["primary", "secondary"]
+sessions_dir = ""
+
+[antigravity]
+enabled = true
+items = ["gemini.5h", "gemini.week", "claude_gpt.5h", "claude_gpt.week"]
+
+[opencode]
+enabled = true
+account = ""
+models = ["glm-5.3-flash", "deepseek-v4.1-flash", "deepseek-v4-pro", "mimo-v2.6-pro"]
+
+[opencode.model_rows]
+
+[display]
+timezone = ""
+high_contrast = false
+rotate_180 = false
+page_seconds = 0
+
+[insights]
+history_dir = ""
+retention_days = 7

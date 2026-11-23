@@ -1,0 +1,54 @@
+name: Build binaries
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          # macOS 26 requires LC_UUID, emitted by default since Go 1.24.
+          go-version: stable
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Package Linux and macOS binaries
+        shell: bash
+        run: |
+          stage="$(mktemp -d)"
+          mkdir -p "$stage/assets" "$stage/docs" dist
+          cp LICENSE THIRD_PARTY.txt README.md trofeo.toml "$stage/"
+          cp assets/OFL.txt "$stage/assets/"
+          cp docs/panel-demo.png "$stage/docs/"
+          for os in linux darwin; do
+            for arch in amd64 arm64; do
+              GOOS="$os" GOARCH="$arch" go build -trimpath -o "$stage/trofeo-quota" .
+              tar -czf "dist/quota-panel-$os-$arch.tar.gz" -C "$stage" .
+            done
+          done
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Upload binaries and checksums
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: quota-panel-binaries
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0

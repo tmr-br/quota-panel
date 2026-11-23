@@ -29,9 +29,26 @@ items = ["gemini.5h", "gemini.week", "claude_gpt.5h", "claude_gpt.week"]
 
 [opencode]
 enabled = true
+# 公開 JSON の account。複数ログイン時に表示する標準枠を指定します。
+account = ""
 # 共通の5時間枠を表示する場合は、表示したい位置に "@shared" を追加します。
 models = ["glm-5.3-flash", "deepseek-v4.1-flash", "deepseek-v4-pro", "mimo-v2.6-pro"]
 
 # プラグインに実在するモデル別5時間枠をカスタム行として登録済みの場合に指定。
 [opencode.model_rows]
 # "glm-5.3-flash" = "quota-providers.custom.<definition-id>.<row-key>"
+
+[display]
+# 空ならシステムのタイムゾーン。例 "Asia/Tokyo"。
+timezone = ""
+high_contrast = false
+rotate_180 = false
+# 5行以上の列のページ送り。0なら取得サイクルごと。
+page_seconds = 0
+
+[insights]
+# 専用ローカルディレクトリ。空なら履歴保存を無効にします。
+history_dir = ""
+retention_days = 7
+# 残量がこの値以下になるとログ通知します。回復時にも1回通知します。
+# alert_remaining_percent = 15

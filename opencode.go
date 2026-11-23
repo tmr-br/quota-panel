@@ -23,8 +23,27 @@ func fetchOpenCode(ctx context.Context, c openConfig, now time.Time) (readings, 
 
 type openEntry struct {
 	ID, Window, RenderType, ResultType, Model, ModelID, Ownership string
+	Account, Authority                                            string
 	PercentRemaining                                              *float64
 	ResetAt                                                       *int64
+}
+
+type openProvider struct {
+	Status    string
+	FetchedAt int64
+	Entries   []openEntry
+	Sources   []struct{ ID, Status string }
+}
+
+// show --json may retain a failed account's old rows in a partial provider.
+// Only custom providers identify the successful definitions in the export.
+func (p openProvider) confirmedCustomRow(rowID string) bool {
+	for _, source := range p.Sources {
+		if source.Status == "ok" && source.ID != "" && strings.HasPrefix(rowID, "quota-providers.custom."+source.ID+".") {
+			return true
+		}
+	}
+	return false
 }
 
 func (e openEntry) matches(model, rowID string) bool {
@@ -49,14 +68,37 @@ func (e openEntry) matches(model, rowID string) bool {
 	return e.ID == "opencode-go."+model+".five_hour" || e.ID == "opencode-go.five_hour."+model
 }
 
+func (e openEntry) reading(fetchedAt int64, now time.Time) (reading, error) {
+	if e.PercentRemaining == nil || *e.PercentRemaining > 100 {
+		return reading{}, errors.New("invalid remaining percentage")
+	}
+	// V3 permits a negative remaining percentage when a quota is overdrawn.
+	r := reading{Valid: true, Percent: *e.PercentRemaining}
+	switch e.Authority {
+	case "locally_derived":
+		r.Estimated = true
+	case "provider_reported":
+	default:
+		return reading{}, errors.New("unknown quota authority")
+	}
+	if e.ResetAt != nil {
+		r.Reset = time.Unix(*e.ResetAt, 0)
+	} else {
+		if fetchedAt <= 0 || fetchedAt > now.Unix() {
+			return reading{}, errors.New("cache freshness unknown")
+		}
+		r.ValidUntil = time.Unix(fetchedAt, 0).Add(5 * time.Hour)
+	}
+	if !r.expiresAt().After(now) {
+		return reading{}, errors.New("expired cached quota")
+	}
+	return r, nil
+}
+
 func parseOpenCode(raw []byte, c openConfig, now time.Time) (readings, error) {
 	var data struct {
 		Version   int
-		Providers map[string]struct {
-			Status    string
-			FetchedAt int64
-			Entries   []openEntry
-		}
+		Providers map[string]openProvider
 	}
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return nil, err
@@ -79,32 +121,26 @@ func parseOpenCode(raw []byte, c openConfig, now time.Time) (readings, error) {
 		}
 		if p.Status == "partial" {
 			problems = append(problems, fmt.Errorf("%s: %s reports partial data", model, provider))
+			if !p.confirmedCustomRow(rowID) {
+				continue
+			}
 		}
 		var entries []openEntry
 		for _, e := range p.Entries {
+			if rowID == "" && c.Account != "" && e.Account != c.Account {
+				continue
+			}
 			if e.matches(model, rowID) {
 				entries = append(entries, e)
 			}
 		}
-		if len(entries) != 1 || entries[0].PercentRemaining == nil {
+		if len(entries) != 1 {
 			problems = append(problems, fmt.Errorf("%s: missing or ambiguous 5h quota", model))
 			continue
 		}
-		e := entries[0]
-		var reset time.Time
-		if e.ResetAt != nil {
-			reset = time.Unix(*e.ResetAt, 0)
-			if !reset.After(now) {
-				problems = append(problems, fmt.Errorf("%s: expired cached quota", model))
-				continue
-			}
-		} else if p.FetchedAt <= 0 || p.FetchedAt > now.Unix() || !time.Unix(p.FetchedAt, 0).Add(5*time.Hour).After(now) {
-			problems = append(problems, fmt.Errorf("%s: cache freshness unknown", model))
-			continue
-		}
-		r := measured(*e.PercentRemaining, reset)
-		if !r.Valid {
-			problems = append(problems, fmt.Errorf("%s: invalid remaining percentage", model))
+		r, err := entries[0].reading(p.FetchedAt, now)
+		if err != nil {
+			problems = append(problems, fmt.Errorf("%s: %w", model, err))
 			continue
 		}
 		out[model] = r

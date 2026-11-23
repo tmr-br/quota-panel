@@ -9,8 +9,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 func TestStaticFrameAndPanelRecovery(t *testing.T) {
@@ -53,7 +56,7 @@ func TestStaticFrameAndPanelRecovery(t *testing.T) {
 			}
 			json.NewEncoder(w).Encode(map[string]any{"ok": true, "products": products})
 		case "GET /devices/0416:5409/state":
-			json.NewEncoder(w).Encode(map[string]any{"ok": true, "connected": connected, "resolution": []int{size.X, size.Y}})
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "connected": connected, "wire": "ly", "product": "Trofeo Vision 9.16 LCD", "pm_byte": 66, "sub_byte": 3, "resolution": []int{size.X, size.Y}})
 		case "POST /devices/0416:5409/connect":
 			connected = true
 			io.WriteString(w, `{"ok":true}`)
@@ -113,5 +116,126 @@ func TestStaticFrameAndPanelRecovery(t *testing.T) {
 	send(false)
 	if uploads != 6 {
 		t.Fatalf("geometry changes require exactly one fresh upload, got %d", uploads)
+	}
+}
+
+func TestRejectOtherLYPanelsAndUnverifiedCatalogName(t *testing.T) {
+	for _, test := range []struct {
+		name, product, key string
+		pm, sub            int
+	}{
+		{"11.3 sharing the same USB ID", "Trofeo Vision 11.3 LCD", "0416:5408", 69, 2},
+		{"catalog name hides a different SKU", "Trofeo Vision 9.16 LCD", "0416:5409", 65, 0},
+		{"different PM 66 SKU", "Trofeo Vision 9.16 LCD", "0416:5409", 66, 1},
+		{"catalog name without fingerprint", "Trofeo Vision 9.16 LCD", "0416:5408", 0, 0},
+		{"model mismatch despite fingerprint", "Trofeo Vision 11.3 LCD", "0416:5408", 65, 5},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/devices":
+					json.NewEncoder(w).Encode(map[string]any{"ok": true, "products": []product{{Key: test.key, Native: []int{1920, 462}}}})
+				case devicePath(test.key) + "/state":
+					json.NewEncoder(w).Encode(map[string]any{"ok": true, "connected": true, "product": test.product, "wire": "ly", "pm_byte": test.pm, "sub_byte": test.sub, "resolution": []int{1920, 440}})
+				default:
+					t.Errorf("unexpected %s %s for unidentified panel", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer s.Close()
+			var d delivery
+			if _, err := d.sync(context.Background(), newTrcc(s.URL), test.key, &scene{}); err == nil {
+				t.Fatal("unverified panel accepted")
+			}
+			size, _ := newTrcc(s.URL).previewSize(context.Background(), test.key)
+			if size != catalogSize() {
+				t.Fatalf("offline preview used wrong panel geometry %v", size)
+			}
+		})
+	}
+}
+
+func TestWatchResumesAfterSubscriptionGap(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var attempts atomic.Int32
+	sockets := make(chan *websocket.Conn, 1)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		sockets <- conn
+		<-conn.CloseRead(ctx).Done()
+	}))
+	defer s.Close()
+	w := &panelWatch{wake: make(chan struct{}, 1)}
+	go w.follow(ctx, s.URL, "0416:5408@1-2", time.Millisecond)
+	wait := func(epoch uint64) {
+		t.Helper()
+		select {
+		case <-w.wake:
+			if n := w.epoch.Load(); n != epoch {
+				t.Fatalf("connection epoch %d, want %d", n, epoch)
+			}
+		case <-ctx.Done():
+			t.Fatal("watch did not invalidate the acknowledgement")
+		}
+	}
+	wait(1)
+	conn := <-sockets
+	for _, msg := range []string{`{"event":"DeviceDisconnected","fields":{"key":"0416:5408@1-3"}}`, `{"event":"DeviceConnected","fields":{"key":"0416:5408@1-2"}}`} {
+		if err := conn.Write(ctx, websocket.MessageText, []byte(msg)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wait(2)
+	cancel()
+}
+
+func TestSendChecksFreshnessAfterHandshake(t *testing.T) {
+	now := time.Now()
+	p := panel{ID: "codex", Title: "Codex", Keys: []string{"primary"}, Values: readings{"primary": measured(61, now.Add(-time.Second))}}
+	stale := &scene{panels: []panel{p}, at: now.Add(-2 * time.Minute)}
+	current := &scene{panels: []panel{p}, at: now}
+	want, err := current.pngAt(catalogSize())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := stale.pngAt(catalogSize())
+	if err != nil || bytes.Equal(want, old) {
+		t.Fatal("fixture did not show a quota reset", err)
+	}
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/devices":
+			io.WriteString(w, `{"ok":true,"products":[{"key":"0416:5408"}]}`)
+		case "/devices/0416:5408/state":
+			io.WriteString(w, `{"ok":true,"connected":true,"product":"Trofeo Vision 9.16 LCD","wire":"ly","pm_byte":65,"sub_byte":5,"resolution":[1920,462]}`)
+		case "/devices/0416:5408/display/send-image":
+			f, _, err := r.FormFile("image")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer f.Close()
+			b, err := io.ReadAll(f)
+			if err != nil || !bytes.Equal(want, b) {
+				t.Error("sent an expired reading after handshake", err)
+			}
+			io.WriteString(w, `{"ok":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer s.Close()
+	var d delivery
+	if _, err = d.sync(context.Background(), newTrcc(s.URL), "", stale); err != nil {
+		t.Fatal(err)
 	}
 }

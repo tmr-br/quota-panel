@@ -29,13 +29,24 @@ type product struct {
 }
 type deviceState struct {
 	restReply
-	Connected  bool  `json:"connected"`
-	Resolution []int `json:"resolution"`
+	Connected  bool   `json:"connected"`
+	Product    string `json:"product"`
+	Wire       string `json:"wire"`
+	PM         int    `json:"pm_byte"`
+	Sub        int    `json:"sub_byte"`
+	Resolution []int  `json:"resolution"`
 }
 
 func (s deviceState) canvas() (image.Point, error) {
 	if !s.Connected || len(s.Resolution) != 2 || s.Resolution[0] <= 0 || s.Resolution[1] <= 0 {
 		return image.Point{}, errors.New("live handshake resolution unavailable")
+	}
+	// The product name can be the registry default for every panel sharing
+	// these USB IDs. trcc v9.12.2 maps the 9.16 LCD (A1LD7) and its ARGB
+	// version (A1LD11) by PM/SUB in core/variants.py and ly_lcd.py.
+	known916 := (s.PM == 65 && s.Sub >= 3 && s.Sub <= 5) || (s.PM == 66 && (s.Sub == 3 || s.Sub == 4))
+	if s.Wire != "ly" || s.Product != "Trofeo Vision 9.16 LCD" || !known916 {
+		return image.Point{}, fmt.Errorf("unverified Trofeo Vision 9.16 handshake: product=%q wire=%q PM=%d SUB=%d", s.Product, s.Wire, s.PM, s.Sub)
 	}
 	return image.Pt(s.Resolution[0], s.Resolution[1]), nil
 }
@@ -165,6 +176,15 @@ type delivery struct {
 	target       string
 	digest       [sha256.Size]byte
 	acknowledged bool
+	watch        *panelWatch
+	epoch        uint64
+}
+
+func (d *delivery) connectionEpoch() uint64 {
+	if d.watch == nil {
+		return 0
+	}
+	return d.watch.epoch.Load()
 }
 
 // An observed disconnect invalidates the acknowledgement even when the PNG is
@@ -175,6 +195,7 @@ func (d *delivery) sync(ctx context.Context, t trcc, wanted string, frame *scene
 		d.acknowledged = false
 		return "", err
 	}
+	epoch := d.connectionEpoch()
 	state, err := t.state(ctx, p)
 	var httpErr httpFailure
 	absent := errors.As(err, &httpErr) && httpErr.status == 404
@@ -187,6 +208,7 @@ func (d *delivery) sync(ctx context.Context, t trcc, wanted string, frame *scene
 		if err = t.request(ctx, "POST", devicePath(p.Key)+"/connect", "", nil, nil); err != nil {
 			return "", err
 		}
+		epoch = d.connectionEpoch()
 		state, err = t.state(ctx, p)
 		if err != nil {
 			return "", err
@@ -200,6 +222,12 @@ func (d *delivery) sync(ctx context.Context, t trcc, wanted string, frame *scene
 		d.acknowledged = false
 		return "", fmt.Errorf("%s: %w (catalog %v)", p.Key, err, p.Native)
 	}
+	// Discovery or a fresh USB handshake can span a quota reset. Validate
+	// cached readings again before handing a live image to the REST API.
+	now := time.Now()
+	if change := nextExpiration(frame.panels, frame.at); !frame.demo && !change.IsZero() && !now.Before(change) {
+		frame = &scene{panels: frame.panels, at: frame.display.local(now), display: frame.display, page: frame.page}
+	}
 	png, err := frame.pngAt(size)
 	if err != nil {
 		d.acknowledged = false
@@ -207,13 +235,20 @@ func (d *delivery) sync(ctx context.Context, t trcc, wanted string, frame *scene
 	}
 	target := fmt.Sprintf("%s/%s %dx%d", t.base, p.Key, size.X, size.Y)
 	digest := sha256.Sum256(png)
-	if d.acknowledged && d.target == target && d.digest == digest {
+	// Events that led to this successful handshake (including our own
+	// /connect) are covered by this upload. Events during an upload require
+	// another probe because it may have reached the previous connection.
+	if d.connectionEpoch() != epoch {
+		d.acknowledged = false
+		return "", errors.New("panel connection changed during verification; rechecking")
+	}
+	if d.acknowledged && d.target == target && d.digest == digest && d.epoch == epoch {
 		return "", nil
 	}
 	if err := t.upload(ctx, p, png); err != nil {
 		d.acknowledged = false
 		return "", err
 	}
-	*d = delivery{target, digest, true}
+	d.target, d.digest, d.epoch, d.acknowledged = target, digest, epoch, true
 	return "trcc accepted native PNG: " + target, nil
 }

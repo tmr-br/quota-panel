@@ -9,6 +9,7 @@ import (
 	"image/draw"
 	"image/png"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,12 +26,13 @@ func catalogSize() image.Point { return image.Pt(catalogWidth, catalogHeight) }
 // A snapshot is rendered directly at the active panel's native resolution.
 // Cache its PNG across health probes; a different handshake needs new pixels.
 type scene struct {
-	panels []panel
-	at     time.Time
-	demo   bool
-	page   uint64
-	size   image.Point
-	png    []byte
+	display displayConfig
+	panels  []panel
+	at      time.Time
+	demo    bool
+	page    uint64
+	size    image.Point
+	png     []byte
 }
 
 func (s *scene) pngAt(size image.Point) ([]byte, error) {
@@ -41,7 +43,8 @@ func (s *scene) pngAt(size image.Point) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, err := r.frame(s.panels, s.at, s.demo, s.page)
+	r.display = s.display
+	b, err := r.frame(s.panels, s.display.local(s.at), s.demo, s.page)
 	if err != nil {
 		return nil, err
 	}
@@ -53,10 +56,11 @@ func (s *scene) pngAt(size image.Point) ([]byte, error) {
 var japaneseFont []byte
 
 type renderer struct {
-	size  image.Point
-	scale float64
-	faces map[int]font.Face
-	bold  map[int]font.Face
+	display displayConfig
+	size    image.Point
+	scale   float64
+	faces   map[int]font.Face
+	bold    map[int]font.Face
 }
 
 func newRenderer(size image.Point) (renderer, error) {
@@ -86,6 +90,25 @@ func newRenderer(size image.Point) (renderer, error) {
 	}
 	return r, nil
 }
+func (r renderer) paint(c color.RGBA) color.RGBA {
+	if !r.display.HighContrast {
+		return c
+	}
+	switch c {
+	case background:
+		return rgb(0)
+	case muted:
+		return rgb(0xe0e6ea)
+	case ink:
+		return rgb(0xffffff)
+	case divider:
+		return rgb(0x8fa1ac)
+	case track:
+		return rgb(0x4c5b66)
+	default:
+		return c
+	}
+}
 func (r renderer) px(n int) int { return max(1, int(math.Round(float64(n)*r.scale))) }
 
 func rgb(v uint32) color.RGBA { return color.RGBA{uint8(v >> 16), uint8(v >> 8), uint8(v), 255} }
@@ -110,45 +133,42 @@ func fit(s string, f font.Face, max int) string {
 	if font.MeasureString(f, s).Ceil() <= max {
 		return s
 	}
-	runes := []rune(s)
-	for len(runes) > 0 {
-		runes = runes[:len(runes)-1]
-		t := string(runes) + "…"
-		if font.MeasureString(f, t).Ceil() <= max {
-			return t
-		}
+	if font.MeasureString(f, "…").Ceil() > max {
+		return ""
 	}
-	return "…"
+	runes := []rune(s)
+	end := sort.Search(len(runes), func(i int) bool { return font.MeasureString(f, string(runes[:i+1])+"…").Ceil() > max })
+	return string(runes[:end]) + "…"
 }
 
 func (r renderer) frame(ps []panel, now time.Time, demo bool, page uint64) ([]byte, error) {
 	width, height := r.size.X, r.size.Y
 	px := r.px
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
-	fill(img, 0, 0, width, height, background)
+	fill(img, 0, 0, width, height, r.paint(background))
 	if len(ps) == 0 {
-		label(img, px(48), height/2+px(14), "表示対象がありません", r.faces[36], muted)
+		label(img, px(48), height/2+px(14), "表示対象がありません", r.faces[36], r.paint(muted))
 	}
 	for i, p := range ps {
 		left, right := i*width/len(ps), (i+1)*width/len(ps)
 		if i > 0 {
-			fill(img, left, px(20), px(2), height-2*px(20), divider)
+			fill(img, left, px(20), px(2), height-2*px(20), r.paint(divider))
 		}
 		x, end := left+px(28), right-px(28)
 		accent := accents[p.ID]
 		fill(img, x, px(37), px(24), px(4), accent)
 		label(img, x+px(36), px(45), p.Unit, r.faces[20], accent)
 		if demo {
-			label(img, end-font.MeasureString(r.bold[16], "DEMO").Ceil(), px(44), "DEMO", r.bold[16], muted)
+			label(img, end-font.MeasureString(r.bold[16], "DEMO").Ceil(), px(44), "DEMO", r.bold[16], r.paint(muted))
 		}
-		label(img, x, px(100), p.Title, r.bold[42], ink)
-		fill(img, x, px(116), end-x, px(2), divider)
+		label(img, x, px(100), p.Title, r.bold[42], r.paint(ink))
+		fill(img, x, px(116), end-x, px(2), r.paint(divider))
 		pages := (len(p.Keys) + 3) / 4
 		index := int(page % uint64(pages))
 		keys := p.Keys[index*4 : min((index+1)*4, len(p.Keys))]
 		if pages > 1 {
 			s := fmt.Sprintf("%d/%d", index+1, pages)
-			label(img, end-font.MeasureString(r.bold[16], s).Ceil(), px(96), s, r.bold[16], muted)
+			label(img, end-font.MeasureString(r.bold[16], s).Ceil(), px(96), s, r.bold[16], r.paint(muted))
 		}
 		if len(p.Keys) <= 2 {
 			for j, k := range keys {
@@ -160,6 +180,9 @@ func (r renderer) frame(ps []panel, now time.Time, demo bool, page uint64) ([]by
 			}
 		}
 	}
+	if r.display.Rotate180 {
+		rotateRGBA(img)
+	}
 	var b bytes.Buffer
 	enc := png.Encoder{CompressionLevel: png.BestSpeed}
 	if err := enc.Encode(&b, img); err != nil {
@@ -170,6 +193,9 @@ func (r renderer) frame(ps []panel, now time.Time, demo bool, page uint64) ([]by
 
 func percentText(v float64) string {
 	// Avoid rounding a tiny remaining allowance to 0 or a partial one to 100.
+	if v < 0 && v > -1 {
+		return "<0"
+	}
 	if v > 0 && v < 1 {
 		return "<1"
 	}
@@ -179,9 +205,9 @@ func percentText(v float64) string {
 	return fmt.Sprintf("%.0f", v)
 }
 
-func bar(img draw.Image, x, y, w, h int, ratio float64, c color.Color) {
-	fill(img, x, y, w, h, track)
-	n := int(math.Round(float64(w) * min(ratio, 100) / 100))
+func (r renderer) bar(img draw.Image, x, y, w, h int, ratio float64, c color.Color) {
+	fill(img, x, y, w, h, r.paint(track))
+	n := int(math.Round(float64(w) * max(0, min(ratio, 100)) / 100))
 	if ratio > 0 && n == 0 {
 		n = 1
 	}
@@ -191,16 +217,16 @@ func bar(img draw.Image, x, y, w, h int, ratio float64, c color.Color) {
 func (r renderer) largeRow(img draw.Image, p panel, k string, x, end, y int, now time.Time) {
 	px := r.px
 	v := p.valueAt(k, now)
-	label(img, x, y+px(30), fit(rowLabel(p, k), r.faces[25], end-x), r.faces[25], ink)
+	label(img, x, y+px(30), fit(displayLabel(p, k), r.faces[25], end-x), r.faces[25], r.paint(ink))
 	if !v.Valid {
-		label(img, x, y+px(98), "取得不能", r.faces[36], muted)
+		label(img, x, y+px(98), "取得不能", r.faces[36], r.paint(muted))
 		return
 	}
 	s := percentText(v.Percent)
-	label(img, x, y+px(99), s, r.bold[70], ink)
+	label(img, x, y+px(99), s, r.bold[70], r.paint(ink))
 	label(img, x+font.MeasureString(r.bold[70], s).Ceil()+px(6), y+px(97), "%", r.bold[32], accents[p.ID])
-	bar(img, x, y+px(112), end-x, px(8), v.Percent, accents[p.ID])
-	label(img, x, y+px(146), resetText(p.ID, v, now), r.faces[20], muted)
+	r.bar(img, x, y+px(112), end-x, px(8), v.Percent, accents[p.ID])
+	label(img, x, y+px(146), resetText(p.ID, v, now), r.faces[20], r.paint(muted))
 }
 
 func (r renderer) smallRow(img draw.Image, p panel, k string, x, end, y int, now time.Time) {
@@ -208,20 +234,37 @@ func (r renderer) smallRow(img draw.Image, p panel, k string, x, end, y int, now
 	v := p.valueAt(k, now)
 	value := "取得不能"
 	face := r.faces[22]
-	c := muted
+	c := r.paint(muted)
 	if v.Valid {
 		value = percentText(v.Percent) + "%"
 		face = r.bold[39]
-		c = ink
+		c = r.paint(ink)
 	}
 	valueWidth := font.MeasureString(face, value).Ceil()
-	title := strings.TrimSpace(rowLabel(p, k))
-	label(img, x, y+px(34), fit(title, r.faces[22], end-x-valueWidth-px(12)), r.faces[22], ink)
+	title := strings.TrimSpace(displayLabel(p, k))
+	label(img, x, y+px(34), fit(title, r.faces[22], end-x-valueWidth-px(12)), r.faces[22], r.paint(ink))
 	label(img, end-valueWidth, y+px(34), value, face, c)
 	if !v.Valid {
-		fill(img, x, y+px(60), end-x, px(2), divider)
+		fill(img, x, y+px(60), end-x, px(2), r.paint(divider))
 		return
 	}
-	bar(img, x, y+px(43), end-x, px(6), v.Percent, accents[p.ID])
-	label(img, x, y+px(72), resetText(p.ID, v, now), r.faces[18], muted)
+	r.bar(img, x, y+px(43), end-x, px(6), v.Percent, accents[p.ID])
+	label(img, x, y+px(72), resetText(p.ID, v, now), r.faces[18], r.paint(muted))
+}
+
+func displayLabel(p panel, k string) string {
+	name := rowLabel(p, k)
+	if p.Values[k].Estimated && p.ID != "claude" {
+		return "推定 · " + name
+	}
+	return name
+}
+
+// The renderer owns a tightly packed RGBA image.
+func rotateRGBA(img *image.RGBA) {
+	for i, j := 0, len(img.Pix)-4; i < j; i, j = i+4, j-4 {
+		for c := 0; c < 4; c++ {
+			img.Pix[i+c], img.Pix[j+c] = img.Pix[j+c], img.Pix[i+c]
+		}
+	}
 }

@@ -75,61 +75,130 @@ func nextExpiration(ps []panel, now time.Time) time.Time {
 	for _, p := range ps {
 		for _, key := range p.Keys {
 			v := p.Values[key]
-			if v.Valid && v.Reset.After(now) && (first.IsZero() || v.Reset.Before(first)) {
-				first = v.Reset
+			end := v.expiresAt()
+			if !v.Valid || !end.After(now) {
+				continue
+			}
+			if p.ID == "claude" && v.Reset.After(now) {
+				// resetText uses ceiling minutes, then displays only whole
+				// hours for windows of a day or longer.
+				lastMinute := (v.Reset.Sub(now) - 1) / time.Minute
+				if lastMinute+1 >= 24*60 {
+					lastMinute = (lastMinute+1)/60*60 - 1
+				}
+				if change := v.Reset.Add(-lastMinute * time.Minute); change.Before(end) {
+					end = change
+				}
+			}
+			if first.IsZero() || end.Before(first) {
+				first = end
 			}
 		}
 	}
 	return first
 }
 
-func serve(ctx context.Context, path string, c config) error {
-	s := newSources()
-	d := diagnostics{}
-	var ack delivery
+// Collection owns its caches and runs one complete cycle at a time. The
+// panel loop remains free to handle resets and reconnections during slow I/O.
+func pollSources(ctx context.Context, path string, c config, publish func(config, []panel, time.Time)) {
+	s, d := newSources(), diagnostics{}
+	for ctx.Err() == nil {
+		start := time.Now()
+		loaded, err := c.reload(path)
+		d.record("TOML", err)
+		if err == nil {
+			c = loaded
+		}
+		ps := d.snapshot(ctx, s, c)
+		if ctx.Err() != nil {
+			return
+		}
+		if publish != nil {
+			publish(c, ps, time.Now())
+		}
+		next := start.Add(time.Duration(c.Interval) * time.Second)
+		timer := time.NewTimer(time.Until(next))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+type panelUpdate struct {
+	config config
+	panels []panel
+}
+
+func hasMultiplePages(ps []panel) bool {
+	for _, p := range ps {
+		if len(p.Keys) > 4 {
+			return true
+		}
+	}
+	return false
+}
+
+func serve(ctx context.Context, path string, c config, observer func(config, []panel, time.Time), headless bool) error {
+	if headless {
+		pollSources(ctx, path, c, observer)
+		return nil
+	}
+	updates := make(chan panelUpdate, 1)
+	stopped := make(chan struct{})
+	go func(initial config) {
+		defer close(stopped)
+		pollSources(ctx, path, initial, func(cfg config, ps []panel, at time.Time) {
+			// A busy REST endpoint only needs the latest scene. It must not
+			// delay acquisition or the observer that records every snapshot.
+			update := panelUpdate{cfg, ps}
+			select {
+			case updates <- update:
+			default:
+				select {
+				case <-updates:
+				default:
+				}
+				updates <- update // sole producer, one vacant slot
+			}
+			if observer != nil {
+				observer(cfg, ps, at)
+			}
+		})
+	}(c)
+	defer func() { <-stopped }()
+
 	t := newTrcc(c.TrccURL)
 	watch := newWatch(ctx, c.TrccURL, c.DeviceKey)
 	defer func() { watch.stop() }()
-	var epoch, page uint64
-	var nextFetch, nextProbe, expires time.Time
-	var ps []panel
-	var frame *scene
+	d := diagnostics{}
+	ack := delivery{watch: watch}
+	var page uint64
+	var expires, nextPage time.Time
+	var haveSnapshot bool
+	now := time.Now()
+	ps := panels(c)
+	frame := &scene{panels: ps, at: c.Display.local(now), display: c.Display}
+	// A slow first collection must not leave a previous run's numbers on
+	// the panel. Quick collections replace this empty frame before upload.
+	nextProbe := now.Add(time.Second)
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
 	for ctx.Err() == nil {
 		now := time.Now()
-		fetched := !now.Before(nextFetch)
-		if fetched {
-			loaded, err := readConfig(path)
-			d.record("TOML", err)
-			if err == nil {
-				if c.TrccURL != loaded.TrccURL || c.DeviceKey != loaded.DeviceKey {
-					watch.stop()
-					watch = newWatch(ctx, loaded.TrccURL, loaded.DeviceKey)
-					t = newTrcc(loaded.TrccURL)
-					ack = delivery{}
-					epoch = 0
-				}
-				c = loaded
-			}
-			ps = d.snapshot(ctx, s, c)
-			now = time.Now()
-			nextFetch = now.Add(time.Duration(c.Interval) * time.Second)
-			if frame != nil {
-				page++
-			}
+		paged := !nextPage.IsZero() && !now.Before(nextPage)
+		if paged {
+			page++
+			nextPage = now.Add(time.Duration(c.Display.PageSeconds) * time.Second)
 		}
-		if ctx.Err() != nil {
-			break
-		}
-		if fetched || (!expires.IsZero() && !expires.After(now)) {
-			frame = &scene{panels: ps, at: now, page: page}
+		if paged || (!expires.IsZero() && !now.Before(expires)) {
+			frame = &scene{panels: ps, at: c.Display.local(now), display: c.Display, page: page}
 			expires = nextExpiration(ps, now)
 			nextProbe = time.Time{}
 		}
 		if !now.Before(nextProbe) {
-			if g := watch.epoch.Load(); g != epoch {
-				ack.acknowledged = false
-				epoch = g
-			}
 			msg, err := ack.sync(ctx, t, c.DeviceKey, frame)
 			d.record("trcc", err)
 			if msg != "" {
@@ -137,20 +206,42 @@ func serve(ctx context.Context, path string, c config) error {
 			}
 			nextProbe = time.Now().Add(10 * time.Second)
 		}
-		next := nextFetch
-		if nextProbe.Before(next) {
-			next = nextProbe
+		next := nextProbe
+		for _, deadline := range []time.Time{expires, nextPage} {
+			if !deadline.IsZero() && deadline.Before(next) {
+				next = deadline
+			}
 		}
-		if !expires.IsZero() && expires.Before(next) {
-			next = expires
-		}
-		timer := time.NewTimer(time.Until(next))
+		timer.Reset(time.Until(next))
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return nil
+		case u := <-updates:
+			now = time.Now()
+			newConfig := u.config
+			if c.TrccURL != newConfig.TrccURL || c.DeviceKey != newConfig.DeviceKey {
+				watch.stop()
+				watch = newWatch(ctx, newConfig.TrccURL, newConfig.DeviceKey)
+				t = newTrcc(newConfig.TrccURL)
+				ack = delivery{watch: watch}
+			}
+			switch {
+			case !hasMultiplePages(u.panels):
+				nextPage, page = time.Time{}, 0
+			case newConfig.Display.PageSeconds == 0:
+				nextPage = time.Time{}
+				if haveSnapshot {
+					page++
+				}
+			case nextPage.IsZero() || c.Display.PageSeconds != newConfig.Display.PageSeconds:
+				nextPage = now.Add(time.Duration(newConfig.Display.PageSeconds) * time.Second)
+			}
+			c, ps = newConfig, u.panels
+			haveSnapshot = true
+			frame = &scene{panels: ps, at: c.Display.local(now), display: c.Display, page: page}
+			expires = nextExpiration(ps, now)
+			nextProbe = time.Time{}
 		case <-watch.wake:
-			timer.Stop()
 			nextProbe = time.Time{}
 		case <-timer.C:
 		}

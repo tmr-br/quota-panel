@@ -9,10 +9,19 @@ import (
 
 // A zero-value reading is unavailable. A measured 0% must be explicit.
 type reading struct {
-	Percent float64
-	Valid   bool
-	Reset   time.Time
-	Label   string
+	Percent    float64
+	Valid      bool
+	Estimated  bool
+	Reset      time.Time
+	ValidUntil time.Time // Cache expiry when independent from the quota reset.
+	Label      string
+}
+
+func (r reading) expiresAt() time.Time {
+	if r.Reset.IsZero() || (!r.ValidUntil.IsZero() && r.ValidUntil.Before(r.Reset)) {
+		return r.ValidUntil
+	}
+	return r.Reset
 }
 
 func measured(p float64, reset time.Time) reading {
@@ -32,7 +41,7 @@ type panel struct {
 
 func (p panel) valueAt(key string, now time.Time) reading {
 	v := p.Values[key]
-	if !v.Reset.IsZero() && !v.Reset.After(now) {
+	if expiry := v.expiresAt(); !expiry.IsZero() && !expiry.After(now) {
 		v.Valid = false
 	}
 	return v

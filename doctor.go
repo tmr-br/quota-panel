@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,35 +46,70 @@ func thermalrightUSB(ctx context.Context) ([]string, error) {
 			ids = append(ids, "0416:"+strings.TrimSpace(string(product)))
 		}
 	case "darwin":
-		b, err := commandOutput(ctx, 20*time.Second, "system_profiler", "SPUSBDataType", "-json")
-		if err != nil {
-			return nil, err
-		}
-		type node struct {
-			Vendor   string `json:"vendor_id"`
-			Product  string `json:"product_id"`
-			Children []node `json:"_items"`
-		}
-		var tree struct {
-			Devices []node `json:"SPUSBDataType"`
-		}
-		if err := json.Unmarshal(b, &tree); err != nil {
-			return nil, err
-		}
-		var walk func([]node)
-		walk = func(nodes []node) {
-			for _, n := range nodes {
-				v := strings.Fields(strings.ToLower(n.Vendor))
-				p := strings.Fields(strings.ToLower(n.Product))
-				if len(v) > 0 && v[0] == "0x0416" && len(p) > 0 {
-					ids = append(ids, "0416:"+strings.TrimPrefix(p[0], "0x"))
-				}
-				walk(n.Children)
-			}
-		}
-		walk(tree.Devices)
+		return macUSB(ctx)
 	default:
 		return nil, fmt.Errorf("USB inventory unavailable for %s", runtime.GOOS)
+	}
+	return ids, nil
+}
+
+// Unsupported data types can produce successful, empty reports. Select a
+// type that the host actually advertises before interpreting an empty list.
+func macUSB(ctx context.Context) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	list, err := commandOutput(ctx, 20*time.Second, "system_profiler", "-listDataTypes")
+	if err != nil {
+		return nil, err
+	}
+	types := strings.Fields(string(list))
+	report := "SPUSBHostDataType"
+	if !slices.Contains(types, report) {
+		report = "SPUSBDataType"
+		if !slices.Contains(types, report) {
+			return nil, errors.New("system_profiler lists no supported USB report")
+		}
+	}
+	b, err := commandOutput(ctx, 20*time.Second, "system_profiler", report, "-json")
+	if err != nil {
+		return nil, err
+	}
+	type node struct {
+		Vendor      string `json:"vendor_id"`
+		Product     string `json:"product_id"`
+		HostVendor  string `json:"USBDeviceKeyVendorID"`
+		HostProduct string `json:"USBDeviceKeyProductID"`
+		Children    []node `json:"_items"`
+	}
+	var tree map[string][]node
+	if err := json.Unmarshal(b, &tree); err != nil {
+		return nil, err
+	}
+	nodes := tree[report]
+	if nodes == nil {
+		return nil, fmt.Errorf("system_profiler response lacks %s device list", report)
+	}
+	var ids []string
+	for len(nodes) > 0 {
+		n := nodes[len(nodes)-1]
+		nodes = append(nodes[:len(nodes)-1], n.Children...)
+		vendor, product := n.Vendor, n.Product
+		if report == "SPUSBHostDataType" {
+			vendor, product = n.HostVendor, n.HostProduct
+		}
+		v := strings.Fields(strings.ToLower(vendor))
+		if len(v) == 0 || v[0] != "0x0416" {
+			continue
+		}
+		p := strings.Fields(strings.ToLower(product))
+		if len(p) == 0 {
+			return nil, errors.New("system_profiler omitted the product ID of a 0416 device")
+		}
+		pid, err := strconv.ParseUint(strings.TrimPrefix(p[0], "0x"), 16, 16)
+		if err != nil {
+			return nil, fmt.Errorf("invalid 0416 product ID: %w", err)
+		}
+		ids = append(ids, fmt.Sprintf("0416:%04x", pid))
 	}
 	return ids, nil
 }
@@ -147,9 +184,10 @@ func doctor(ctx context.Context, c config) error {
 	if err != nil {
 		return fmt.Errorf("handshake unavailable: %w", err)
 	}
-	if !s.Connected || len(s.Resolution) != 2 {
-		return errors.New("no live handshake resolution; -demo will request a connection")
+	size, err := s.canvas()
+	if err != nil {
+		return fmt.Errorf("handshake %s: %w", p.Key, err)
 	}
-	fmt.Printf("Live handshake %s: %dx%d\n", p.Key, s.Resolution[0], s.Resolution[1])
+	fmt.Printf("Live handshake %s: %dx%d\n", p.Key, size.X, size.Y)
 	return nil
 }

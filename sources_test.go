@@ -96,10 +96,10 @@ func TestOpenCodeModelIdentityCacheAndRealZero(t *testing.T) {
 	c := openConfig{Models: []string{"glm", "deepseek", "@shared", "mimo"}, ModelRows: map[string]string{"mimo": "quota-providers.custom.account.mimo"}}
 	raw := `{"version":3,"providers":{
 	"opencode-go":{"status":"ok","entries":[
-		{"id":"opencode-go.five_hour","name":"glm","window":"5h","renderType":"percent","resultType":"quota","percentRemaining":64,"resetAt":1000010},
-		{"modelId":"deepseek","window":"5h","renderType":"percent","resultType":"quota","percentRemaining":0,"resetAt":1000020},
-		{"modelId":"glm","window":"Weekly","renderType":"percent","resultType":"quota","percentRemaining":73,"resetAt":1000010}]},
-	"quota-providers":{"status":"ok","entries":[{"id":"quota-providers.custom.account.mimo","ownership":"user_configured","window":"5h","renderType":"percent","resultType":"quota","percentRemaining":26,"resetAt":1000010}]}}}`
+		{"id":"opencode-go.five_hour","name":"glm","window":"5h","renderType":"percent","resultType":"quota","authority":"provider_reported","percentRemaining":64,"resetAt":1000010},
+		{"modelId":"deepseek","window":"5h","renderType":"percent","resultType":"quota","authority":"provider_reported","percentRemaining":0,"resetAt":1000020},
+		{"modelId":"glm","window":"Weekly","renderType":"percent","resultType":"quota","authority":"provider_reported","percentRemaining":73,"resetAt":1000010}]},
+	"quota-providers":{"status":"ok","entries":[{"id":"quota-providers.custom.account.mimo","ownership":"user_configured","authority":"provider_reported","window":"5h","renderType":"percent","resultType":"quota","percentRemaining":26,"resetAt":1000010}]}}}`
 	v, err := parseOpenCode([]byte(raw), c, now)
 	if err == nil || v["glm"].Valid || !v["deepseek"].Valid || v["deepseek"].Percent != 0 || v["@shared"].Percent != 64 || v["mimo"].Percent != 26 {
 		t.Fatal(v, err)
