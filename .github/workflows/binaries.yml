@@ -52,3 +52,54 @@ jobs:
           path: dist/
           if-no-files-found: error
           compression-level: 0
+
+  verify-package:
+    name: Run packaged binary (${{ matrix.target }})
+    needs: build
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-latest
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: darwin-amd64
+            runner: macos-15-intel
+          - target: darwin-arm64
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: quota-panel-binaries
+          path: dist
+
+      - name: Verify checksums and run the native executable
+        working-directory: dist
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          shasum -a 256 -c SHA256SUMS
+          mkdir extracted
+          tar -xzf "quota-panel-$TARGET.tar.gz" -C extracted
+          cd extracted
+          ./trofeo-quota -version
+          ./trofeo-quota -config trofeo.toml -check-config
+          ./trofeo-quota -demo -status json > "$RUNNER_TEMP/status.json"
+          ./trofeo-quota -demo -preview-size 1920x462 -preview "$RUNNER_TEMP/panel.png"
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import json
+          import struct
+          import sys
+          from pathlib import Path
+
+          folder = Path(sys.argv[1])
+          status = json.loads((folder / "status.json").read_text())
+          assert status["demo"] and len(status["groups"]) == 4
+          png = (folder / "panel.png").read_bytes()
+          assert png[:8] == bytes.fromhex("89504e470d0a1a0a")
+          assert struct.unpack(">II", png[16:24]) == (1920, 462)
+          PY
