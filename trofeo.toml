@@ -1,0 +1,37 @@
+# 保存した変更は次の取得サイクルから有効です。
+interval_seconds = 300
+trcc_url = "http://localhost:9876"
+# 同型機が複数ある場合は trcc の /devices に出る key を指定します。
+device_key = ""
+display_order = ["claude", "codex", "antigravity", "opencode"]
+
+[claude]
+enabled = true
+items = ["5h", "week"]
+# 空なら ~/.claude/projects （CLAUDE_CONFIG_DIR 設定時はその下の projects）。
+projects_dir = ""
+# 自分で決めたトークン予算。0 は未設定です。推定値として表示します。
+five_hour_tokens = 0
+weekly_tokens = 0
+# 契約画面で確認した週リセットの一例をタイムゾーン付きで指定します。
+# 例 "2026-11-25T18:00:00+09:00"。この時点から7日周期で集計します。
+weekly_reset_anchor = ""
+
+[codex]
+enabled = true
+items = ["primary", "secondary"]
+# 空なら ~/.codex/sessions （CODEX_HOME 設定時はその下の sessions）。
+sessions_dir = ""
+
+[antigravity]
+enabled = true
+items = ["gemini.5h", "gemini.week", "claude_gpt.5h", "claude_gpt.week"]
+
+[opencode]
+enabled = true
+# 共通の5時間枠を表示する場合は、表示したい位置に "@shared" を追加します。
+models = ["glm-5.3-flash", "deepseek-v4.1-flash", "deepseek-v4-pro", "mimo-v2.6-pro"]
+
+# プラグインに実在するモデル別5時間枠をカスタム行として登録済みの場合に指定。
+[opencode.model_rows]
+# "glm-5.3-flash" = "quota-providers.custom.<definition-id>.<row-key>"
