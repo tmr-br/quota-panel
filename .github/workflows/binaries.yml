@@ -33,7 +33,7 @@ jobs:
           stage="$(mktemp -d)"
           mkdir -p "$stage/assets" "$stage/docs" dist
           cp LICENSE THIRD_PARTY.txt README.md trofeo.toml "$stage/"
-          cp assets/OFL.txt "$stage/assets/"
+          cp assets/OFL.txt assets/IBMPlexSans-OFL.txt "$stage/assets/"
           cp docs/panel-demo.png "$stage/docs/"
           for os in linux darwin; do
             for arch in amd64 arm64; do

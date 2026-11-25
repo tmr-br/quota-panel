@@ -45,7 +45,7 @@ Thermalright Trofeo Vision 9.16 インチ用の利用枠ダッシュボード。
 | `./trofeo-quota -preview quota.png` | 実データの PNG を保存。取得できない行も確認可能 |
 | `./trofeo-quota -once` | 実データの画像を 1 回送信 |
 | `./trofeo-quota` | カレントディレクトリの `trofeo.toml` で常駐。ファイルがなければ内蔵既定値を使用 |
-| `./trofeo-quota -status text` | USB にアクセスせず使用率・残量・リセット時刻を表示 |
+| `./trofeo-quota -status text` | USB にアクセスせず残量・取得時刻・リセット時刻を表示 |
 | `./trofeo-quota -status json` | 1 回の取得結果を JSON で出力。未知の割合は `null`、実測ゼロは `0` |
 | `./trofeo-quota -status prometheus` | Prometheus のテキスト形式で出力 |
 | `./trofeo-quota -demo -preview demo.png -preview-size 1920x462` | 明示した寸法で、完全にオフラインの画像を生成。`-page 2` で複数ページの列の2ページ目を選択可能 |
@@ -128,8 +128,9 @@ trcc display send-image 0416:5408 demo.png
 | Codex | セッションログに記録された **使用率**。primary と secondary の期間・リセット日時を表示 |
 | Antigravity | Gemini と Claude/GPT のプールごとの **残量**。5 時間枠・週間枠を独立して表示 |
 | OpenCode Go | OpenCode Console が返す Go プランの **残量**。5 時間枠・週間枠・月間枠を表示 |
+| System | パネルを動かす Mac の CPU・メモリ・スワップの **使用率** とストレージの **空き**。容量（GB）も併記。macOS 専用で既定は無効 |
 
-数値の欠落、期限切れ、コマンド失敗、読めないログ、曖昧なアカウントは該当行を **取得不能** にします。計測できた 0% は 0% と表示します。取得に失敗した理由は標準エラーに記録します。表示時刻の既定値はコンピューターのローカル時刻です。
+数値の欠落、期限切れ、コマンド失敗、読めないログ、曖昧なアカウントは該当行を **取得不能** にします。計測できた 0% は 0% と表示します。取得に失敗した理由は標準エラーに記録します。常駐時のパネルと Web ダッシュボードは stale-while-revalidate で表示します。一度取得できた行は、次の取得に失敗しても前回値を表示し続けます。列の as of はその値の取得時刻のまま（失敗時は `(error)` 付き）なので、古さが分かります。リセット時刻を過ぎた値は薄く表示して `reset passed · refreshing` と示し、その時点で再取得します。N/A になるのは一度も取得できていない行だけです。起動直後は、有効な全列の初回取得が終わるまでパネルへ画像を送りません。`-status`・履歴・アラートは、従来どおり各回の取得結果そのもの（欠落・期限切れは取得不能）を使います。表示時刻の既定値はコンピューターのローカル時刻です。
 
 ### Claude Code
 
@@ -155,6 +156,10 @@ API が使えず、下記のトークン予算を設定してある場合は、�
 
 OpenCode に OpenCode Console でログインしたとき（`opencode auth login` で OpenCode を選択）の OAuth トークンを、OpenCode の資格情報データベース（既定 `~/.local/share/opencode/opencode.db`、`XDG_DATA_HOME`・`OPENCODE_DB` に対応）から読みます。読み取りは `sqlite3` コマンドで行います。そのトークンでログイン先の Console の `GET /api/go/status` を呼び、`access.meters` の `fiveHour`・`week`・`month` について `usedMicroCents / limitMicroCents` から残量を計算します。月間枠にリセット日時がない場合はプランの終了日時を使います。設定は `[opencode]` の `items`（`5h`・`week`・`month`）で行と順番を選ぶだけです。トークンは Console 以外に送らず、表示・保存・更新もしません。期限切れの場合は `opencode` を一度起動すると OpenCode が更新します。Go プランの残量はアカウント共通で、モデル別の残量はありません。上限超過の負の残量も表示します。この API は非公開のため、仕様が変わる可能性があります。[CodexBar の実装](https://github.com/steipete/CodexBar/tree/main/Sources/CodexBarCore/Providers/OpenCodeGo)
 
+### System
+
+`[system]` の `enabled = true` で、パネルを動かす Mac 自身の指標を最後の列に表示します（`display_order` に `system` を含めてください）。`items`（`cpu`・`memory`・`swap`・`disk`）で行と順番を選べます。取得は macOS 標準コマンドで、CPU は `iostat -n 0 -c 2 -w 1` の 2 回目のサンプル（100 − idle。`top` より負荷が軽いため）、メモリは `vm_stat` と `sysctl hw.memsize` から Activity Monitor と同じ「App メモリ＋固定＋圧縮」、スワップは `sysctl vm.swapusage` の使用量と確保済み容量、ストレージは `df -k -P /System/Volumes/Data`（失敗時は `/`）の空き容量です。CPU・メモリ・スワップが 80% 以上、ストレージの空きが 10% 以下になると、その行のバーと % を警告色で表示します。コマンドが失敗した行は取得不能（N/A）になり、0% とは表示しません。スワップファイルが 1 つもない場合だけ、計測値として 0% を表示します。値は利用枠とは別の短い周期（`[system]` の `interval_seconds`、既定 5 秒）で更新します。パネル表示専用のため、`-status`、Web の JSON、履歴、アラートには含みません。
+
 ## 自動起動
 
 既存の設定ファイルを指定すると、実行ファイルの位置に合わせたユーザー用サービス定義を標準出力に生成できます。
@@ -172,7 +177,7 @@ Linux はユーザー用 systemd、macOS はログインユーザー用 LaunchAg
 
 Actions の **Build binaries** は手動実行または `v*` タグで Linux・macOS の amd64 / arm64 用アーカイブと `SHA256SUMS` を生成します。展開したアーティファクトで `shasum -a 256 -c SHA256SUMS` を実行できます。[配布ワークフロー](https://github.com/tmr-br/quota-panel/actions/workflows/binaries.yml)
 
-ソースからのビルドには Go 1.23 以降を使います。macOS 26 向けの実行ファイルは Mach-O UUID が標準で付く Go 1.24 以降でビルドしてください。日本語フォントはバイナリに埋め込んであります。実行にはパネル制御用の trcc と、有効にしたソースで利用する外部コマンドが必要です。
+ソースからのビルドには Go 1.23 以降を使います。macOS 26 向けの実行ファイルは Mach-O UUID が標準で付く Go 1.24 以降でビルドしてください。パネルの欧文には IBM Plex Sans（Regular / Medium / SemiBold、数字は等幅）を使い、欧文フォントにない文字は日本語フォント（Noto Sans CJK JP のサブセット）で描画します。どちらもバイナリに埋め込んであります。実行にはパネル制御用の trcc と、有効にしたソースで利用する外部コマンドが必要です。
 
 ```sh
 CGO_ENABLED=0 go test ./...
@@ -185,4 +190,4 @@ CGO_ENABLED=0 go build -trimpath -o trofeo-quota .
 
 quota-panel 本体は MIT License で公開しています。[LICENSE](LICENSE)
 
-同梱のフォントと Go ライブラリには、それぞれのライセンスが適用されます。[第三者ライセンス一覧](THIRD_PARTY.txt) · [日本語フォントの SIL Open Font License](assets/OFL.txt)
+同梱のフォントと Go ライブラリには、それぞれのライセンスが適用されます。[第三者ライセンス一覧](THIRD_PARTY.txt) · [IBM Plex Sans の SIL Open Font License](assets/IBMPlexSans-OFL.txt) · [日本語フォントの SIL Open Font License](assets/OFL.txt)

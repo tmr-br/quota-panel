@@ -27,7 +27,7 @@ func TestStaticFrameAndPanelRecovery(t *testing.T) {
 	}
 	now := time.Unix(1780000000, 0)
 	ps := demoPanels(c, now)
-	if len(ps) != 4 || len(ps[0].Keys) != 2 {
+	if len(ps) != 5 || len(ps[0].Keys) != 2 || ps[4].ID != "system" {
 		t.Fatalf("bad defaults: %+v", ps)
 	}
 	frame, err := r.frame(ps, now, true, 0)

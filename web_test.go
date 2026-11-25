@@ -43,11 +43,14 @@ func TestDashboardServesTheSameSnapshotInEachFormat(t *testing.T) {
 	at := time.Now().Add(-time.Minute)
 	rows := []string{"zero", "missing", "expired", "fourth", "fifth"}
 	values := readings{"zero": measured(0, time.Now().Add(time.Hour)), "expired": measured(48, at)}
-	ps := []panel{{ID: "codex", Title: "Codex", Keys: rows, Values: values}}
+	ps := []panel{{ID: "codex", Title: "Codex", Keys: rows, Values: values, FetchedAt: at, FetchFailed: true}}
 	d.publish(ps, at, displayConfig{}, false)
 	html, header := get("GET", "/", 200)
-	if !strings.Contains(header.Get("Content-Type"), "text/html") || !bytes.Contains(html, []byte(">0%<")) || bytes.Count(html, []byte("N/A")) != 4 {
+	if !strings.Contains(header.Get("Content-Type"), "text/html") || !bytes.Contains(html, []byte(">100%<")) || !bytes.Contains(html, []byte("value=\"100\"")) || !bytes.Contains(html, []byte("as of "+at.Local().Format("15:04")+" (error)")) || bytes.Count(html, []byte("N/A")) != 4 {
 		t.Fatal("HTML did not distinguish zero from missing and expired data")
+	}
+	if bytes.Contains(html, []byte("<small>left")) || bytes.Contains(html, []byte("<th>left</th>")) {
+		t.Fatal("unexpected left label")
 	}
 	api, _ := get("GET", "/api/status", 200)
 	var snap quotaSnapshot
@@ -69,7 +72,7 @@ func TestDashboardServesTheSameSnapshotInEachFormat(t *testing.T) {
 	if err := writeStatus(&text, snap, "text"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(text.String(), "zero  0%") || strings.Count(text.String(), "N/A") != 4 {
+	if !strings.Contains(text.String(), "zero  100%") || strings.Count(text.String(), "N/A") != 4 {
 		t.Fatal("text output did not distinguish measured zero and unavailable data")
 	}
 	first, _ := get("GET", "/panel.png", 200)

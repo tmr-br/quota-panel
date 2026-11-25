@@ -15,6 +15,8 @@ type reading struct {
 	Reset      time.Time
 	ValidUntil time.Time // Cache expiry when independent from the quota reset.
 	Label      string
+	ObservedAt time.Time // Timestamp of a source-reported snapshot, if available.
+	Detail     string    // Secondary line for system metrics, e.g. "6.1 of 7.0 GB swapped".
 }
 
 func (r reading) expiresAt() time.Time {
@@ -34,9 +36,12 @@ func measured(p float64, reset time.Time) reading {
 type readings map[string]reading
 
 type panel struct {
-	ID, Title, Unit string
-	Keys            []string
-	Values          readings
+	ID, Title   string
+	Subtitle    string // Small marker under the as-of time, e.g. the host name.
+	Keys        []string
+	Values      readings
+	FetchedAt   time.Time
+	FetchFailed bool
 }
 
 func (p panel) valueAt(key string, now time.Time) reading {
@@ -47,6 +52,32 @@ func (p panel) valueAt(key string, now time.Time) reading {
 	return v
 }
 
+func remainingPercent(id string, percent float64) float64 {
+	if id == "claude" || id == "codex" {
+		return 100 - percent
+	}
+	return percent
+}
+
+func sourceStamp(at time.Time, failed bool, now time.Time) string {
+	if at.IsZero() {
+		if failed {
+			return "not acquired (error)"
+		}
+		return "not acquired"
+	}
+	at = at.In(now.Location())
+	format := "15:04"
+	if at.Format("2006-01-02") != now.Format("2006-01-02") {
+		format = "Jan 2 15:04"
+	}
+	label := "as of " + at.Format(format)
+	if failed {
+		label += " (error)"
+	}
+	return label
+}
+
 func panels(c config) []panel {
 	var out []panel
 	for _, id := range c.Order {
@@ -54,17 +85,20 @@ func panels(c config) []panel {
 		var on bool
 		switch id {
 		case "claude":
-			p = panel{ID: id, Title: "Claude Code", Unit: "used", Keys: c.Claude.Items}
+			p = panel{ID: id, Title: "Claude Code", Keys: c.Claude.Items}
 			on = c.Claude.Enabled
 		case "codex":
-			p = panel{ID: id, Title: "Codex", Unit: "used", Keys: c.Codex.Items}
+			p = panel{ID: id, Title: "Codex", Keys: c.Codex.Items}
 			on = c.Codex.Enabled
 		case "antigravity":
-			p = panel{ID: id, Title: "Antigravity", Unit: "Pool left", Keys: c.Antigravity.Items}
+			p = panel{ID: id, Title: "Antigravity", Keys: c.Antigravity.Items}
 			on = c.Antigravity.Enabled
 		case "opencode":
-			p = panel{ID: id, Title: "OpenCode Go", Unit: "left", Keys: c.OpenCode.Items}
+			p = panel{ID: id, Title: "OpenCode Go", Keys: c.OpenCode.Items}
 			on = c.OpenCode.Enabled
+		case "system":
+			p = panel{ID: id, Title: "System", Subtitle: hostName(), Keys: c.System.Items}
+			on = c.System.Enabled
 		}
 		if on && len(p.Keys) > 0 {
 			out = append(out, p)
@@ -76,6 +110,18 @@ func panels(c config) []panel {
 func rowLabel(p panel, key string) string {
 	if label := p.Values[key].Label; label != "" {
 		return label
+	}
+	if p.ID == "system" {
+		switch key {
+		case "cpu":
+			return "CPU"
+		case "memory":
+			return "Memory"
+		case "swap":
+			return "Swap"
+		case "disk":
+			return "Storage free"
+		}
 	}
 	switch key {
 	case "5h":
@@ -107,6 +153,20 @@ func demoPanels(c config, now time.Time) []panel {
 	out := panels(c)
 	examples := map[string][]float64{"claude": {36, 62}, "codex": {18, 47}, "antigravity": {82, 54, 70, 38}, "opencode": {94, 76, 58, 32}}
 	for i, p := range out {
+		if p.ID == "system" {
+			details := map[string]reading{
+				"cpu":    {Percent: 23, Valid: true, Detail: "user 15% · sys 8%"},
+				"memory": {Percent: 74, Valid: true, Detail: "11.8 of 16.0 GB used"},
+				"swap":   {Percent: 86, Valid: true, Detail: "6.0 of 7.0 GB swapped"},
+				"disk":   {Percent: 37, Valid: true, Detail: "183 GB free of 494 GB"},
+			}
+			sample := readings{}
+			for _, key := range p.Keys {
+				sample[key] = details[key]
+			}
+			out[i].Values, out[i].FetchedAt = sample, now
+			continue
+		}
 		sample := readings{}
 		for j, key := range p.Keys {
 			reset := now.Add(time.Duration(150+j*21) * time.Minute)
@@ -123,6 +183,7 @@ func demoPanels(c config, now time.Time) []panel {
 			sample[key] = r
 		}
 		out[i].Values = sample
+		out[i].FetchedAt = now
 	}
 	return out
 }
@@ -130,6 +191,9 @@ func demoPanels(c config, now time.Time) []panel {
 func resetText(id string, r reading, now time.Time) string {
 	if !r.Valid {
 		return ""
+	}
+	if id == "system" {
+		return r.Detail
 	}
 	if r.Reset.IsZero() {
 		// An unused rolling window has no reset until its first request.

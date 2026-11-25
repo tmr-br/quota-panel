@@ -175,12 +175,14 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	d := newDashboard()
 	var insights insights
 	health := diagnostics{}
-	observer := func(c config, ps []panel, at time.Time) {
+	observer := func(c config, ps, raw []panel, at time.Time) {
 		d.publish(ps, at, c.Display, false)
-		if c.Insights.HistoryDir == "" && c.Insights.AlertRemaining == nil && insights.low == nil {
+		// History and alerts record what each quota cycle actually read, not
+		// the last-good values the panel keeps showing.
+		if raw == nil || (c.Insights.HistoryDir == "" && c.Insights.AlertRemaining == nil && insights.low == nil) {
 			return
 		}
-		notices, err := insights.observe(c, statusAt(ps, at, time.Now(), false))
+		notices, err := insights.observe(c, statusAt(raw, at, time.Now(), false))
 		health.record("insights", err)
 		for _, n := range notices {
 			log.Print(n)
@@ -219,11 +221,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if *demo {
 		ps = demoPanels(c, now)
 	} else {
-		ps = diagnostics{}.snapshot(ctx, newSources(), c)
+		ps = diagnostics{}.snapshot(ctx, newSources(), c, panels(c))
 		now = time.Now()
 	}
 	if *status != "" {
-		return writeStatus(out, statusAt(ps, now, now, *demo), *status)
+		return writeStatus(out, statusAt(ps, now, now, *demo), *status, c.Display.local(now).Location())
 	}
 	maxPage := 1
 	for _, p := range ps {

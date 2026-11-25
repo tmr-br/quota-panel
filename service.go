@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"slices"
 	"sync"
 	"time"
 )
@@ -14,10 +15,10 @@ type sources struct {
 
 func newSources() sources { return sources{logCache[claudeEvent]{}, logCache[codexEvent]{}} }
 
-// Each provider owns its log cache. Publish a complete new snapshot after the
-// independent fetches finish, preserving the configured order.
-func (s sources) collect(ctx context.Context, c config, now time.Time) ([]panel, []error) {
-	ps := panels(c)
+// Each provider owns its log cache. Return a complete new snapshot of the
+// given panels after the independent fetches finish, preserving their order.
+func (s sources) collect(ctx context.Context, c config, ps []panel, now time.Time) ([]panel, []error) {
+	ps = append([]panel(nil), ps...)
 	problems := make([]error, len(ps))
 	var wg sync.WaitGroup
 	for i := range ps {
@@ -36,14 +37,49 @@ func (s sources) collect(ctx context.Context, c config, now time.Time) ([]panel,
 				values, err = fetchOpenCode(ctx, c.OpenCode, now)
 			case "antigravity":
 				values, err = fetchAntigravity(ctx, p.Keys, now, fetchRPC)
+			case "system":
+				values, err = fetchSystem(ctx, p.Keys, systemRunner)
 			}
 			p.Values = values
+			p.FetchFailed = err != nil
+			p.FetchedAt = acquisitionTime(p, time.Now())
 			ps[i] = p
 			problems[i] = err
 		}()
 	}
 	wg.Wait()
 	return ps, problems
+}
+
+// Use source snapshot time when supplied (Codex log records), otherwise the
+// time a valid reading was collected. Errors without data never advance it.
+func acquisitionTime(p panel, collected time.Time) time.Time {
+	var at time.Time
+	for _, key := range p.Keys {
+		v := p.Values[key]
+		if !v.Valid {
+			continue
+		}
+		t := v.ObservedAt
+		if t.IsZero() {
+			t = collected
+		}
+		if at.IsZero() || t.Before(at) {
+			at = t
+		}
+	}
+	return at
+}
+
+func preserveAcquisitionTimes(ps []panel, last map[string]time.Time) {
+	for i := range ps {
+		p := &ps[i]
+		if p.FetchedAt.IsZero() && p.FetchFailed {
+			p.FetchedAt = last[p.ID]
+		} else if !p.FetchedAt.IsZero() {
+			last[p.ID] = p.FetchedAt
+		}
+	}
 }
 
 type diagnostics map[string]string
@@ -62,8 +98,8 @@ func (d diagnostics) record(id string, err error) {
 		d[id] = msg
 	}
 }
-func (d diagnostics) snapshot(ctx context.Context, s sources, c config) []panel {
-	ps, problems := s.collect(ctx, c, time.Now())
+func (d diagnostics) snapshot(ctx context.Context, s sources, c config, want []panel) []panel {
+	ps, problems := s.collect(ctx, c, want, time.Now())
 	for i, p := range ps {
 		d.record(p.Title, problems[i])
 	}
@@ -98,25 +134,170 @@ func nextExpiration(ps []panel, now time.Time) time.Time {
 	return first
 }
 
-// Collection owns its caches and runs one complete cycle at a time. The
-// panel loop remains free to handle resets and reconnections during slow I/O.
-func pollSources(ctx context.Context, path string, c config, publish func(config, []panel, time.Time)) {
+// splitPanels separates the cheap local System column from the API-backed
+// quota columns, which refresh on their own schedules.
+func splitPanels(c config) (quota []panel, system *panel) {
+	for _, p := range panels(c) {
+		if p.ID == "system" {
+			system = &p
+		} else {
+			quota = append(quota, p)
+		}
+	}
+	return quota, system
+}
+
+// revalidate is stale-while-revalidate for one column: rows the new fetch
+// could not read keep their last good reading, together with the time it was
+// acquired, so the as-of stamp shows how old the column is. A column that has
+// never been read stays unavailable.
+func revalidate(prev panel, had bool, fresh panel, collected time.Time) panel {
+	values := readings{}
+	for k, v := range fresh.Values {
+		if v.Valid && v.ObservedAt.IsZero() {
+			v.ObservedAt = collected
+		}
+		values[k] = v
+	}
+	if had {
+		for _, k := range fresh.Keys {
+			if old, ok := prev.Values[k]; !values[k].Valid && ok && old.Valid {
+				values[k] = old
+			}
+		}
+	}
+	fresh.Values = values
+	if at := acquisitionTime(fresh, collected); !at.IsZero() {
+		fresh.FetchedAt = at
+	} else if had {
+		fresh.FetchedAt = prev.FetchedAt
+	}
+	return fresh
+}
+
+// nextRowExpiry is the first future reset or cache expiry among readings;
+// the quota loop refetches then instead of waiting a full interval.
+func nextRowExpiry(ps []panel, now time.Time) time.Time {
+	var first time.Time
+	for _, p := range ps {
+		for _, k := range p.Keys {
+			v := p.Values[k]
+			if end := v.expiresAt(); v.Valid && end.After(now) && (first.IsZero() || end.Before(first)) {
+				first = end
+			}
+		}
+	}
+	return first
+}
+
+// Collection owns its caches. Quota sources run one complete cycle every
+// interval_seconds (sooner when a displayed reading reaches its reset); the
+// System column runs on its own short interval. Each finished fetch replaces
+// only its own columns in the displayed snapshot. Nothing is published until
+// every enabled column has been fetched once, so the panel never shows a
+// placeholder frame. publish receives the displayed panels, and the raw
+// quota snapshot (nil after a System-only refresh) for history and alerts.
+func pollSources(ctx context.Context, path string, c config, publish func(cfg config, shown, raw []panel, at time.Time)) {
 	s, d := newSources(), diagnostics{}
+	var mu sync.Mutex
+	cur := c
+	shown := map[string]panel{}
+	last := map[string]time.Time{}
+	quotaDone, systemDone, published := false, false, false
+	kick := make(chan struct{}, 1)
+
+	// emit runs with mu held.
+	emit := func(raw []panel) {
+		_, system := splitPanels(cur)
+		if !published && (!quotaDone || (system != nil && !systemDone)) {
+			return
+		}
+		ps := panels(cur)
+		for i, p := range ps {
+			if v, ok := shown[p.ID]; ok {
+				v.Title, v.Subtitle, v.Keys = p.Title, p.Subtitle, p.Keys
+				ps[i] = v
+			}
+		}
+		published = true
+		if publish != nil {
+			publish(cur, ps, raw, time.Now())
+		}
+	}
+
+	sysDiag := diagnostics{} // the System loop logs on its own
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for ctx.Err() == nil {
+			mu.Lock()
+			cfg := cur
+			mu.Unlock()
+			_, system := splitPanels(cfg)
+			if system != nil {
+				ps := sysDiag.snapshot(ctx, s, cfg, []panel{*system})
+				if ctx.Err() != nil {
+					return
+				}
+				mu.Lock()
+				prev, had := shown["system"]
+				shown["system"] = revalidate(prev, had, ps[0], time.Now())
+				systemDone = true
+				emit(nil)
+				mu.Unlock()
+			}
+			timer := time.NewTimer(time.Duration(max(cfg.System.Interval, 1)) * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-kick:
+				timer.Stop()
+			case <-timer.C:
+			}
+		}
+	}()
+
 	for ctx.Err() == nil {
 		start := time.Now()
 		loaded, err := c.reload(path)
 		d.record("TOML", err)
 		if err == nil {
 			c = loaded
+			mu.Lock()
+			old := cur
+			cur = loaded
+			mu.Unlock()
+			if !old.System.equal(loaded.System) || !slices.Equal(old.Order, loaded.Order) {
+				select {
+				case kick <- struct{}{}:
+				default:
+				}
+			}
 		}
-		ps := d.snapshot(ctx, s, c)
+		quota, _ := splitPanels(c)
+		ps := d.snapshot(ctx, s, c, quota)
+		preserveAcquisitionTimes(ps, last)
 		if ctx.Err() != nil {
 			return
 		}
-		if publish != nil {
-			publish(c, ps, time.Now())
+		collected := time.Now()
+		mu.Lock()
+		var view []panel
+		for _, p := range ps {
+			prev, had := shown[p.ID]
+			shown[p.ID] = revalidate(prev, had, p, collected)
+			view = append(view, shown[p.ID])
 		}
+		quotaDone = true
+		emit(append([]panel{}, ps...))
+		mu.Unlock()
 		next := start.Add(time.Duration(c.Interval) * time.Second)
+		if soon := nextRowExpiry(view, collected); !soon.IsZero() && soon.Add(time.Second).Before(next) {
+			next = soon.Add(time.Second)
+		}
 		timer := time.NewTimer(time.Until(next))
 		select {
 		case <-ctx.Done():
@@ -130,7 +311,12 @@ func pollSources(ctx context.Context, path string, c config, publish func(config
 type panelUpdate struct {
 	config config
 	panels []panel
+	quota  bool // includes a fresh quota cycle (advances auto paging)
 }
+
+// observerFunc receives every published snapshot: the displayed panels and,
+// after a quota cycle, the raw quota readings (nil after a System refresh).
+type observerFunc func(cfg config, shown, raw []panel, at time.Time)
 
 func hasMultiplePages(ps []panel) bool {
 	for _, p := range ps {
@@ -141,7 +327,7 @@ func hasMultiplePages(ps []panel) bool {
 	return false
 }
 
-func serve(ctx context.Context, path string, c config, observer func(config, []panel, time.Time), headless bool) error {
+func serve(ctx context.Context, path string, c config, observer observerFunc, headless bool) error {
 	if headless {
 		pollSources(ctx, path, c, observer)
 		return nil
@@ -150,21 +336,22 @@ func serve(ctx context.Context, path string, c config, observer func(config, []p
 	stopped := make(chan struct{})
 	go func(initial config) {
 		defer close(stopped)
-		pollSources(ctx, path, initial, func(cfg config, ps []panel, at time.Time) {
+		pollSources(ctx, path, initial, func(cfg config, ps, raw []panel, at time.Time) {
 			// A busy REST endpoint only needs the latest scene. It must not
 			// delay acquisition or the observer that records every snapshot.
-			update := panelUpdate{cfg, ps}
+			update := panelUpdate{cfg, ps, raw != nil}
 			select {
 			case updates <- update:
 			default:
 				select {
-				case <-updates:
+				case old := <-updates:
+					update.quota = update.quota || old.quota
 				default:
 				}
 				updates <- update // sole producer, one vacant slot
 			}
 			if observer != nil {
-				observer(cfg, ps, at)
+				observer(cfg, ps, raw, at)
 			}
 		})
 	}(c)
@@ -181,9 +368,9 @@ func serve(ctx context.Context, path string, c config, observer func(config, []p
 	now := time.Now()
 	ps := panels(c)
 	frame := &scene{panels: ps, at: c.Display.local(now), display: c.Display}
-	// A slow first collection must not leave a previous run's numbers on
-	// the panel. Quick collections replace this empty frame before upload.
-	nextProbe := now.Add(time.Second)
+	// Nothing is sent until the first complete snapshot arrives: the panel
+	// keeps its current image rather than showing a frame of placeholders.
+	var nextProbe time.Time
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
 	for ctx.Err() == nil {
@@ -198,7 +385,7 @@ func serve(ctx context.Context, path string, c config, observer func(config, []p
 			expires = nextExpiration(ps, now)
 			nextProbe = time.Time{}
 		}
-		if !now.Before(nextProbe) {
+		if haveSnapshot && !now.Before(nextProbe) {
 			msg, err := ack.sync(ctx, t, c.DeviceKey, frame)
 			d.record("trcc", err)
 			if msg != "" {
@@ -207,6 +394,9 @@ func serve(ctx context.Context, path string, c config, observer func(config, []p
 			nextProbe = time.Now().Add(10 * time.Second)
 		}
 		next := nextProbe
+		if !haveSnapshot {
+			next = now.Add(time.Hour)
+		}
 		for _, deadline := range []time.Time{expires, nextPage} {
 			if !deadline.IsZero() && deadline.Before(next) {
 				next = deadline
@@ -230,7 +420,7 @@ func serve(ctx context.Context, path string, c config, observer func(config, []p
 				nextPage, page = time.Time{}, 0
 			case newConfig.Display.PageSeconds == 0:
 				nextPage = time.Time{}
-				if haveSnapshot {
+				if haveSnapshot && u.quota {
 					page++
 				}
 			case nextPage.IsZero() || c.Display.PageSeconds != newConfig.Display.PageSeconds:

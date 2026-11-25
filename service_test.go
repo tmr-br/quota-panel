@@ -118,8 +118,8 @@ func TestSlowAcquisitionDoesNotHoldUpReplugOrExpiry(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("QUOTA_PANEL_TEST_DIR", root)
 	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
-	// Hold the first snapshot until its loading frame arrives, then hold
-	// the second open past the Codex reset. Cancellation stops the subprocess.
+	// Hold the first snapshot to check that no placeholder frame is sent
+	// meanwhile, then hold the second open past the Codex reset. Cancellation stops the subprocess.
 	script := `#!/bin/sh
 if [ -f "$QUOTA_PANEL_TEST_DIR/first" ]; then
 	touch "$QUOTA_PANEL_TEST_DIR/busy"
@@ -208,14 +208,25 @@ echo '{}'
 			return upload{}
 		}
 	}
-	pending := nextImage()
+	for {
+		if _, err := os.Stat(filepath.Join(root, "first")); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("provider never started its first collection")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	select {
+	case <-images:
+		t.Fatal("a placeholder frame was sent before the first snapshot completed")
+	case <-time.After(1500 * time.Millisecond):
+	}
 	if err := os.WriteFile(filepath.Join(root, "continue"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 	first := nextImage()
-	if bytes.Equal(pending.data, first.data) {
-		t.Fatal("the initial frame did not transition from unavailable to the Codex reading")
-	}
 	var ws *websocket.Conn
 	select {
 	case ws = <-sockets:
@@ -243,7 +254,7 @@ echo '{}'
 	}
 	expired := nextImage()
 	if bytes.Equal(expired.data, first.data) || expired.at.Before(reset) {
-		t.Fatal("expired Codex usage stayed on the panel while collecting")
+		t.Fatal("expired Codex usage was not marked as refreshing while collecting")
 	}
 }
 
@@ -262,7 +273,7 @@ func TestHeadlessPublishesWithoutContactingTrcc(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	calls := 0
-	err = serve(ctx, path, c, func(cfg config, ps []panel, at time.Time) {
+	err = serve(ctx, path, c, func(cfg config, ps, _ []panel, at time.Time) {
 		calls++
 		if cfg.TrccURL != s.URL || len(ps) != 0 || at.IsZero() {
 			t.Error("unexpected published snapshot")
@@ -292,7 +303,7 @@ func TestUnresponsivePanelDoesNotBlockSnapshotObserver(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
-	err = serve(ctx, path, c, func(config, []panel, time.Time) {
+	err = serve(ctx, path, c, func(config, []panel, []panel, time.Time) {
 		calls++
 		if calls == 3 {
 			cancel()

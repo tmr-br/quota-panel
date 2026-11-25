@@ -44,6 +44,15 @@ type openConfig struct {
 	selection
 }
 
+type systemConfig struct {
+	selection
+	Interval int `toml:"interval_seconds"`
+}
+
+func (a systemConfig) equal(b systemConfig) bool {
+	return a.Enabled == b.Enabled && a.Interval == b.Interval && slices.Equal(a.Items, b.Items)
+}
+
 type config struct {
 	fromFile    bool
 	Display     displayConfig  `toml:"display"`
@@ -56,6 +65,7 @@ type config struct {
 	Codex       codexConfig    `toml:"codex"`
 	Antigravity selection      `toml:"antigravity"`
 	OpenCode    openConfig     `toml:"opencode"`
+	System      systemConfig   `toml:"system"`
 }
 
 func readConfig(path string) (config, error) {
@@ -90,6 +100,9 @@ func readConfig(path string) (config, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return c, errors.New("trcc_url must be an HTTP(S) base URL")
 	}
+	if c.System.Interval < 1 || c.System.Interval > 3600 {
+		return c, errors.New("system.interval_seconds must be between 1 and 3600")
+	}
 	c.TrccURL = strings.TrimRight(c.TrccURL, "/")
 	if c.Claude.FiveHourTokens < 0 || c.Claude.WeeklyTokens < 0 {
 		return c, errors.New("Claude token budgets must be nonnegative")
@@ -103,11 +116,12 @@ func readConfig(path string) (config, error) {
 		name         string
 		items, valid []string
 	}{
-		{"display_order", c.Order, []string{"claude", "codex", "antigravity", "opencode"}},
+		{"display_order", c.Order, []string{"claude", "codex", "antigravity", "opencode", "system"}},
 		{"claude.items", c.Claude.Items, []string{"5h", "week"}},
 		{"codex.items", c.Codex.Items, []string{"primary", "secondary"}},
 		{"antigravity.items", c.Antigravity.Items, []string{"gemini.5h", "gemini.week", "claude_gpt.5h", "claude_gpt.week"}},
 		{"opencode.items", c.OpenCode.Items, []string{"5h", "week", "month"}},
+		{"system.items", c.System.Items, []string{"cpu", "memory", "swap", "disk"}},
 	} {
 		seen := map[string]bool{}
 		for _, item := range group.items {

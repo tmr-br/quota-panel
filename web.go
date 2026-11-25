@@ -50,6 +50,16 @@ func loopbackAddress(addr string) (string, error) {
 var dashboardHTML string
 
 var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
+	"left": func(v *float64, direction string) *float64 {
+		if v == nil || direction != "used" {
+			return v
+		}
+		left := 100 - *v
+		return &left
+	},
+	"stamp": func(g quotaGroup, loc *time.Location) string {
+		return sourceStamp(g.FetchedAt, g.FetchFailed, time.Now().In(loc))
+	},
 	"percentage": func(v *float64) string {
 		if v == nil {
 			return "N/A"

@@ -14,7 +14,7 @@ import (
 
 func TestDisplayOptionsApplyToExportedPNG(t *testing.T) {
 	now := time.Date(2026, 11, 23, 6, 0, 0, 0, time.UTC)
-	p := panel{ID: "opencode", Title: "OpenCode Go", Unit: "5h left", Keys: []string{"a"}, Values: readings{"a": {Percent: -0.3, Valid: true, Estimated: true, Reset: now.Add(time.Hour)}}}
+	p := panel{ID: "opencode", Title: "OpenCode Go", Keys: []string{"a"}, Values: readings{"a": {Percent: -0.3, Valid: true, Estimated: true, Reset: now.Add(time.Hour)}}}
 	if displayLabel(p, "a") != "est. · a" || percentText(-0.3) != "<0" {
 		t.Fatal("ambiguous model estimate or deficit")
 	}

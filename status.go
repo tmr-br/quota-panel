@@ -20,10 +20,12 @@ type quotaRow struct {
 	ValidUntil *time.Time `json:"valid_until,omitempty"`
 }
 type quotaGroup struct {
-	ID        string     `json:"id"`
-	Title     string     `json:"title"`
-	Direction string     `json:"direction"`
-	Rows      []quotaRow `json:"rows"`
+	ID          string     `json:"id"`
+	Title       string     `json:"title"`
+	Direction   string     `json:"direction"`
+	Rows        []quotaRow `json:"rows"`
+	FetchedAt   time.Time  `json:"-"`
+	FetchFailed bool       `json:"-"`
 }
 type quotaSnapshot struct {
 	Version    int          `json:"version"`
@@ -35,11 +37,14 @@ type quotaSnapshot struct {
 func statusAt(ps []panel, observed, now time.Time, demo bool) quotaSnapshot {
 	s := quotaSnapshot{1, observed.UTC(), demo, []quotaGroup{}}
 	for _, p := range ps {
+		if p.ID == "system" {
+			continue // panel-only metrics; not a quota
+		}
 		dir := "remaining"
 		if p.ID == "claude" || p.ID == "codex" {
 			dir = "used"
 		}
-		group := quotaGroup{p.ID, p.Title, dir, []quotaRow{}}
+		group := quotaGroup{ID: p.ID, Title: p.Title, Direction: dir, Rows: []quotaRow{}, FetchedAt: p.FetchedAt, FetchFailed: p.FetchFailed}
 		for _, key := range p.Keys {
 			v := p.valueAt(key, now)
 			row := quotaRow{Key: key, Name: rowLabel(p, key)}
@@ -62,9 +67,13 @@ func statusAt(ps []panel, observed, now time.Time, demo bool) quotaSnapshot {
 	return s
 }
 
-func writeStatus(w io.Writer, s quotaSnapshot, format string) error {
+func writeStatus(w io.Writer, s quotaSnapshot, format string, locations ...*time.Location) error {
 	if format == "json" {
 		return json.NewEncoder(w).Encode(s)
+	}
+	loc := time.Local
+	if len(locations) > 0 {
+		loc = locations[0]
 	}
 	var b strings.Builder
 	if format == "text" {
@@ -73,11 +82,15 @@ func writeStatus(w io.Writer, s quotaSnapshot, format string) error {
 		}
 		b.WriteString(s.ObservedAt.Format("Jan 2 2006 15:04:05 MST") + "\n")
 		for _, g := range s.Groups {
-			fmt.Fprintf(&b, "%s (%s)\n", g.Title, g.Direction)
+			fmt.Fprintf(&b, "%s — %s\n", g.Title, sourceStamp(g.FetchedAt, g.FetchFailed, s.ObservedAt.In(loc)))
 			for _, r := range g.Rows {
 				value := "N/A"
 				if r.Percent != nil {
-					value = percentText(*r.Percent) + "%"
+					percent := *r.Percent
+					if g.Direction == "used" {
+						percent = 100 - percent
+					}
+					value = percentText(percent) + "%"
 					if r.Estimated {
 						value += " est."
 					}

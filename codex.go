@@ -118,7 +118,7 @@ func fetchCodex(ctx context.Context, c codexConfig, cache logCache[codexEvent], 
 			problems = append(problems, fmt.Errorf("%s: missing, conflicting, or expired rate limit", k))
 			continue
 		}
-		r := reading{Valid: true, Percent: *w.Used, Reset: time.Unix(*w.Reset, 0)}
+		r := reading{Valid: true, Percent: *w.Used, ObservedAt: latest.at, Reset: time.Unix(*w.Reset, 0)}
 		switch {
 		case w.Minutes == 10080:
 			r.Label = "weekly"

@@ -2,7 +2,7 @@
 interval_seconds = 300
 trcc_url = "http://localhost:9876"
 device_key = ""
-display_order = ["claude", "codex", "antigravity", "opencode"]
+display_order = ["claude", "codex", "antigravity", "opencode", "system"]
 
 [claude]
 enabled = true
@@ -25,6 +25,11 @@ items = ["gemini.5h", "gemini.week", "claude_gpt.5h", "claude_gpt.week"]
 [opencode]
 enabled = true
 items = ["5h", "week", "month"]
+
+[system]
+enabled = false
+items = ["cpu", "memory", "swap", "disk"]
+interval_seconds = 5
 
 [display]
 timezone = ""
