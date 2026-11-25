@@ -78,7 +78,7 @@ alert_remaining_percent = 15
 
 常駐中、取得サイクルごとに設定した項目の割合・時刻・推定区分をローカルに記録します。取得不能は欠測として記録し、デモは保存しません。保存先は `history_dir/quota-panel-v1/`、ファイルは所有者専用です。保持期間は UTC の日付単位で 1～90 日、サイズ上限は 1 日に 4 MiB のファイル 2 本です。高頻度設定では同じ日の古い記録から入れ替わります。保持期間を過ぎた記録は次回書き込み時に整理します。
 
-CSV は表計算ソフト向けに、`@shared` 等の数式として扱われ得るキーの先頭にアポストロフィを付けます。JSON / JSONL は元のキーを保持します。`-trend-days` は保存期間内の記録を使い、最終観測、実測／推定ごとの残量の最小・最大、欠測件数を集計します。
+CSV は表計算ソフト向けに、`=`・`@` などで始まり数式として扱われ得るキーの先頭にアポストロフィを付けます。JSON / JSONL は元のキーを保持します。`-trend-days` は保存期間内の記録を使い、最終観測、実測／推定ごとの残量の最小・最大、欠測件数を集計します。
 
 通知は標準エラーに出ます。残量がしきい値以下になったときと、その後に回復したときに各1回記録します。Claude Code・Codex の使用率は残量に換算します。取得不能な間は直前の通知状態を保ちます。
 
@@ -124,14 +124,18 @@ trcc display send-image 0416:5408 demo.png
 
 | 列 | 表示値と取得元 |
 | --- | --- |
-| Claude Code | ローカルログから計算した **推定使用率**。5 時間枠・週間枠のリセットまでの残り時間を表示 |
+| Claude Code | Anthropic が返すアカウントの **使用率**（API 不可時はローカルログからの推定）。5 時間枠・週間枠のリセットまでの残り時間を表示 |
 | Codex | セッションログに記録された **使用率**。primary と secondary の期間・リセット日時を表示 |
 | Antigravity | Gemini と Claude/GPT のプールごとの **残量**。5 時間枠・週間枠を独立して表示 |
-| OpenCode Go | 設定したモデルに帰属する **5 時間枠の残量**。共通枠用の行も選択可能 |
+| OpenCode Go | OpenCode Console が返す Go プランの **残量**。5 時間枠・週間枠・月間枠を表示 |
 
 数値の欠落、期限切れ、コマンド失敗、読めないログ、曖昧なアカウントは該当行を **取得不能** にします。計測できた 0% は 0% と表示します。取得に失敗した理由は標準エラーに記録します。表示時刻の既定値はコンピューターのローカル時刻です。
 
 ### Claude Code
+
+既定（`usage_api = true`）では、Claude Code がログイン時に保存した OAuth トークン（macOS はキーチェーンの `Claude Code-credentials`、それ以外は `~/.claude/.credentials.json`）で `GET https://api.anthropic.com/api/oauth/usage` を呼び、`five_hour`・`seven_day` の `utilization`（0〜100 の使用率）と `resets_at` を表示します。設定は不要です。トークンはこの API 以外に送らず、表示・保存・更新もしません。期限切れの場合は `claude` を一度起動すると Claude Code が更新します。この API は非公開のため、仕様が変わる可能性があります。[CodexBar の実装](https://github.com/steipete/CodexBar/tree/main/Sources/CodexBarCore/Providers/Claude/ClaudeOAuth)
+
+API が使えず、下記のトークン予算を設定してある場合は、ローカルログからの推定値（「推定」表示）に切り替えます。
 
 `~/.claude/projects/**/*.jsonl` を再帰的に読み、assistant の入力・出力・キャッシュ作成・キャッシュ読み込みトークンを数えます。サブエージェントの progress 記録と advisor の追加消費も対象です。リクエスト ID、メッセージ ID、親子 UUID を使って複製をまとめ、時刻順に ccusage 方式の 5 時間ブロックを組み立てます。開始は最初の利用時刻を UTC の正時に切り下げます。週は設定したリセット基準から 7 日単位で区切ります。[ccusage のブロックと上限](https://github.com/ryoppippi/ccusage/blob/main/docs/guide/blocks-reports.md)
 
@@ -149,11 +153,7 @@ trcc display send-image 0416:5408 demo.png
 
 ### OpenCode Go
 
-`npx --yes @slkiser/opencode-quota@latest show --json` の公開 JSON v3 を読みます。通常は `--provider opencode-go` で絞り込みます。この CLI は OpenCode が最後に保存したクォータを返すため、OpenCode 側でプラグインのセットアップとログインが必要です。
-
-調査した 6.3.0 の標準プロバイダーはアカウント共通の 5 時間・週・月の行を出力します。**標準出力だけから 4 モデルそれぞれの残量は計算できません。** モデル別の 5 時間行がない場合は「取得不能」です。`models = ["@shared"]` にすると実在する共通 5 時間枠を表示できます。モデル専用の 5 時間行をプラグインにカスタム登録済みの場合は `[opencode.model_rows]` で各モデルに異なる公開行 ID を割り当てられます。デモのモデル別数値は画面確認用です。[公開 JSON 形式](https://github.com/slkiser/opencode-quota/blob/main/docs/readme/external-integration.md) · [OpenCode Go プロバイダー](https://github.com/slkiser/opencode-quota/blob/main/src/providers/opencode-go.ts)
-
-OpenCode の標準行は、複数ログイン時に `[opencode]` の `account` で公開 JSON のアカウント名を指定できます。標準プロバイダーの部分応答はアカウントごとの鮮度が確定できないため「取得不能」です。カスタム行のローカル推定は「推定」と表示します。上限超過の負の残量も表示し、リセット不明の行は取得から 5 時間で失効します。
+OpenCode に OpenCode Console でログインしたとき（`opencode auth login` で OpenCode を選択）の OAuth トークンを、OpenCode の資格情報データベース（既定 `~/.local/share/opencode/opencode.db`、`XDG_DATA_HOME`・`OPENCODE_DB` に対応）から読みます。読み取りは `sqlite3` コマンドで行います。そのトークンでログイン先の Console の `GET /api/go/status` を呼び、`access.meters` の `fiveHour`・`week`・`month` について `usedMicroCents / limitMicroCents` から残量を計算します。月間枠にリセット日時がない場合はプランの終了日時を使います。設定は `[opencode]` の `items`（`5h`・`week`・`month`）で行と順番を選ぶだけです。トークンは Console 以外に送らず、表示・保存・更新もしません。期限切れの場合は `opencode` を一度起動すると OpenCode が更新します。Go プランの残量はアカウント共通で、モデル別の残量はありません。上限超過の負の残量も表示します。この API は非公開のため、仕様が変わる可能性があります。[CodexBar の実装](https://github.com/steipete/CodexBar/tree/main/Sources/CodexBarCore/Providers/OpenCodeGo)
 
 ## 自動起動
 
@@ -164,11 +164,11 @@ OpenCode の標準行は、複数ログイン時に `[opencode]` の `account` �
 ./trofeo-quota -config ./local.toml -service launchd > quota-panel.plist
 ```
 
-Linux はユーザー用 systemd、macOS はログインユーザー用 LaunchAgent の定義です。インストールや起動は OS のサービス管理で行います。普段アプリを起動する常設ディレクトリから生成してください。設定済みの `CODEX_HOME`・`CLAUDE_CONFIG_DIR` は絶対パスにして引き継ぎます。サービスは生成時の作業ディレクトリと絶対 `PATH` を取り込むため、`npx` と `agy` を使えるシェルで生成し、インストール先が変わったら再生成してください。
+Linux はユーザー用 systemd、macOS はログインユーザー用 LaunchAgent の定義です。インストールや起動は OS のサービス管理で行います。普段アプリを起動する常設ディレクトリから生成してください。設定済みの `CODEX_HOME`・`CLAUDE_CONFIG_DIR` は絶対パスにして引き継ぎます。サービスは生成時の作業ディレクトリと絶対 `PATH` を取り込むため、`sqlite3` と `agy` を使えるシェルで生成し、インストール先が変わったら再生成してください。
 
 ## 設定変更とビルド
 
-`display_order` で列の選択と順番、各節の `enabled` で取得の有無、`items` または `models` で行の選択と順番を指定します。列ごとに最大 4 行を表示し、5 行以上は取得サイクルごとにページを切り替えます。`interval_seconds` と `trcc_url` も含めてサイクルごとに読み直します。編集中の TOML に誤りがある場合は最後に読めた設定で動作を続けます。ログのルートは TOML と環境変数 `CLAUDE_CONFIG_DIR`、`CODEX_HOME` に対応します。
+`display_order` で列の選択と順番、各節の `enabled` で取得の有無、`items` で行の選択と順番を指定します。列ごとに最大 4 行を表示し、5 行以上は取得サイクルごとにページを切り替えます。`interval_seconds` と `trcc_url` も含めてサイクルごとに読み直します。編集中の TOML に誤りがある場合は最後に読めた設定で動作を続けます。ログのルートは TOML と環境変数 `CLAUDE_CONFIG_DIR`、`CODEX_HOME` に対応します。
 
 Actions の **Build binaries** は手動実行または `v*` タグで Linux・macOS の amd64 / arm64 用アーカイブと `SHA256SUMS` を生成します。展開したアーティファクトで `shasum -a 256 -c SHA256SUMS` を実行できます。[配布ワークフロー](https://github.com/tmr-br/quota-panel/actions/workflows/binaries.yml)
 

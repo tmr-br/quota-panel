@@ -28,6 +28,7 @@ type selection struct {
 
 type claudeConfig struct {
 	selection
+	UsageAPI          bool   `toml:"usage_api"`
 	ProjectsDir       string `toml:"projects_dir"`
 	FiveHourTokens    int64  `toml:"five_hour_tokens"`
 	WeeklyTokens      int64  `toml:"weekly_tokens"`
@@ -40,10 +41,7 @@ type codexConfig struct {
 }
 
 type openConfig struct {
-	Enabled   bool              `toml:"enabled"`
-	Account   string            `toml:"account"`
-	Models    []string          `toml:"models"`
-	ModelRows map[string]string `toml:"model_rows"`
+	selection
 }
 
 type config struct {
@@ -93,13 +91,6 @@ func readConfig(path string) (config, error) {
 		return c, errors.New("trcc_url must be an HTTP(S) base URL")
 	}
 	c.TrccURL = strings.TrimRight(c.TrccURL, "/")
-	bound := map[string]bool{}
-	for model, id := range c.OpenCode.ModelRows {
-		if strings.TrimSpace(model) == "" || model == "@shared" || !strings.HasPrefix(id, "quota-providers.custom.") || bound[id] {
-			return c, fmt.Errorf("opencode.model_rows: expected a distinct custom quota row id for %q", model)
-		}
-		bound[id] = true
-	}
 	if c.Claude.FiveHourTokens < 0 || c.Claude.WeeklyTokens < 0 {
 		return c, errors.New("Claude token budgets must be nonnegative")
 	}
@@ -116,7 +107,7 @@ func readConfig(path string) (config, error) {
 		{"claude.items", c.Claude.Items, []string{"5h", "week"}},
 		{"codex.items", c.Codex.Items, []string{"primary", "secondary"}},
 		{"antigravity.items", c.Antigravity.Items, []string{"gemini.5h", "gemini.week", "claude_gpt.5h", "claude_gpt.week"}},
-		{"opencode.models", c.OpenCode.Models, nil},
+		{"opencode.items", c.OpenCode.Items, []string{"5h", "week", "month"}},
 	} {
 		seen := map[string]bool{}
 		for _, item := range group.items {

@@ -111,7 +111,7 @@ func writeTrends(ctx context.Context, w io.Writer, c insightsConfig, now time.Ti
 		}
 		for _, group := range snap.Groups {
 			if group.Direction != "used" && group.Direction != "remaining" {
-				return fmt.Errorf("Unknown history direction (%q, %q)", group.ID, group.Direction)
+				return fmt.Errorf("unknown history direction (%q, %q)", group.ID, group.Direction)
 			}
 			for _, row := range group.Rows {
 				key := trendKey{source: group.ID, row: row.Key, direction: group.Direction}

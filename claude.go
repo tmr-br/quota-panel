@@ -210,7 +210,30 @@ func claudeToolIDs(content json.RawMessage, results bool) ([]string, error) {
 	return ids, nil
 }
 
+// Prefer the percentages Anthropic reports for the signed-in account. The
+// local token estimate remains a fallback when budgets are configured.
 func fetchClaude(ctx context.Context, c claudeConfig, cache logCache[claudeEvent], now time.Time) (readings, error) {
+	if !c.UsageAPI {
+		return fetchClaudeLogs(ctx, c, cache, now)
+	}
+	out, apiErr := fetchClaudeUsageAPI(ctx, now)
+	if apiErr == nil {
+		var missing []error
+		for _, key := range c.Items {
+			if !out[key].Valid {
+				missing = append(missing, fmt.Errorf("%s: not reported by the Claude usage API", key))
+			}
+		}
+		return out, errors.Join(missing...)
+	}
+	if c.FiveHourTokens == 0 && c.WeeklyTokens == 0 {
+		return nil, apiErr
+	}
+	out, err := fetchClaudeLogs(ctx, c, cache, now)
+	return out, errors.Join(fmt.Errorf("using the local estimate: %w", apiErr), err)
+}
+
+func fetchClaudeLogs(ctx context.Context, c claudeConfig, cache logCache[claudeEvent], now time.Time) (readings, error) {
 	dir, err := logPath(c.ProjectsDir, "CLAUDE_CONFIG_DIR", ".claude", "projects")
 	if err != nil {
 		return nil, err
@@ -503,5 +526,5 @@ func claudeUsage(events []claudeEvent, c claudeConfig, now time.Time) (readings,
 }
 
 func usedTokens(n, limit int64, reset time.Time) reading {
-	return reading{Valid: true, Percent: 100 * float64(n) / float64(limit), Reset: reset}
+	return reading{Valid: true, Estimated: true, Percent: 100 * float64(n) / float64(limit), Reset: reset}
 }

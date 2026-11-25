@@ -91,38 +91,15 @@ func TestCodexLatestEventNotNewestFileAndExpiredWindow(t *testing.T) {
 	}
 }
 
-func TestOpenCodeModelIdentityCacheAndRealZero(t *testing.T) {
-	now := time.Unix(1000000, 0)
-	c := openConfig{Models: []string{"glm", "deepseek", "@shared", "mimo"}, ModelRows: map[string]string{"mimo": "quota-providers.custom.account.mimo"}}
-	raw := `{"version":3,"providers":{
-	"opencode-go":{"status":"ok","entries":[
-		{"id":"opencode-go.five_hour","name":"glm","window":"5h","renderType":"percent","resultType":"quota","authority":"provider_reported","percentRemaining":64,"resetAt":1000010},
-		{"modelId":"deepseek","window":"5h","renderType":"percent","resultType":"quota","authority":"provider_reported","percentRemaining":0,"resetAt":1000020},
-		{"modelId":"glm","window":"Weekly","renderType":"percent","resultType":"quota","authority":"provider_reported","percentRemaining":73,"resetAt":1000010}]},
-	"quota-providers":{"status":"ok","entries":[{"id":"quota-providers.custom.account.mimo","ownership":"user_configured","authority":"provider_reported","window":"5h","renderType":"percent","resultType":"quota","percentRemaining":26,"resetAt":1000010}]}}}`
-	v, err := parseOpenCode([]byte(raw), c, now)
-	if err == nil || v["glm"].Valid || !v["deepseek"].Valid || v["deepseek"].Percent != 0 || v["@shared"].Percent != 64 || v["mimo"].Percent != 26 {
-		t.Fatal(v, err)
-	}
-	v, _ = parseOpenCode([]byte(raw), c, now.Add(11*time.Second))
-	if v["@shared"].Valid || v["mimo"].Valid || !v["deepseek"].Valid {
-		t.Fatal(v)
-	}
-	v, err = parseOpenCode([]byte(strings.Replace(raw, `"percentRemaining":0`, `"percentRemaining":null`, 1)), c, now)
-	if err == nil || v["deepseek"].Valid {
-		t.Fatal("missing interpreted as zero")
-	}
-}
-
 func TestConfigReloadOrderAndDisable(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "config.toml")
-	writeFixture(t, f, "display_order=['opencode','claude','codex']\n[opencode]\nmodels=['z','a']\n[claude]\nenabled=false\n[codex]\nitems=['secondary']\n")
+	writeFixture(t, f, "display_order=['opencode','claude','codex']\n[opencode]\nitems=['month','5h']\n[claude]\nenabled=false\n[codex]\nitems=['secondary']\n")
 	c, err := readConfig(f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ps := panels(c)
-	if len(ps) != 2 || ps[0].ID != "opencode" || strings.Join(ps[0].Keys, ",") != "z,a" || ps[1].Keys[0] != "secondary" || c.Interval != 300 {
+	if len(ps) != 2 || ps[0].ID != "opencode" || strings.Join(ps[0].Keys, ",") != "month,5h" || ps[1].Keys[0] != "secondary" || c.Interval != 300 {
 		t.Fatal(ps, c.Interval)
 	}
 	writeFixture(t, f, "display_order=['antigravity']\ninterval_seconds=8\n")

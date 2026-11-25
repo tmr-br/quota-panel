@@ -29,7 +29,7 @@ func commandOutput(ctx context.Context, timeout time.Duration, exe string, args 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, args...)
-	// npx may spawn node and agy may spawn a helper. Cancel the whole
+	// agy may spawn a helper. Cancel the whole
 	// invocation so a stuck provider cannot accumulate background processes.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

@@ -254,7 +254,7 @@ func (r renderer) smallRow(img draw.Image, p panel, k string, x, end, y int, now
 
 func displayLabel(p panel, k string) string {
 	name := rowLabel(p, k)
-	if p.Values[k].Estimated && p.ID != "claude" {
+	if p.Values[k].Estimated {
 		return "est. · " + name
 	}
 	return name

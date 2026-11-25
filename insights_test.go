@@ -16,7 +16,7 @@ import (
 
 func sampleQuota(at time.Time) quotaSnapshot {
 	return statusAt([]panel{
-		{ID: "claude", Title: "Claude", Keys: []string{"week"}, Values: readings{"week": measured(88, at.Add(time.Hour))}},
+		{ID: "claude", Title: "Claude", Keys: []string{"week"}, Values: readings{"week": {Valid: true, Percent: 88, Estimated: true, Reset: at.Add(time.Hour)}}},
 		{ID: "opencode", Title: "OpenCode", Keys: []string{"@shared", "quoted, model", "unknown"}, Values: readings{
 			"@shared":       {Valid: true, Percent: 0, ValidUntil: at.Add(time.Minute)},
 			"quoted, model": {Valid: true, Percent: -5, Estimated: true},
@@ -28,7 +28,6 @@ func TestInsightsMissingDemoAndThresholdTransitions(t *testing.T) {
 	s := insights{}
 	threshold := 15.0
 	c := config{Insights: insightsConfig{RetentionDays: 1, AlertRemaining: &threshold}}
-	c.OpenCode.ModelRows = map[string]string{"quoted, model": "quota-providers.custom.pool.q"}
 	sample := sampleQuota(time.Now())
 	observe := func(expected int) []string {
 		t.Helper()
@@ -48,12 +47,6 @@ func TestInsightsMissingDemoAndThresholdTransitions(t *testing.T) {
 	observe(0)
 	sample.Groups[1].Rows[0].Percent = remaining
 	observe(0)
-	// A new selected account begins its own alert state, without repeating Claude's.
-	c.OpenCode.Account = "personal"
-	events = observe(1)
-	if !strings.Contains(events[0], "shared") {
-		t.Fatal(events)
-	}
 	sample.Demo = true
 	*remaining = 30
 	c.Insights.HistoryDir = filepath.Join(t.TempDir(), "uncreated")

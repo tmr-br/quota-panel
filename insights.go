@@ -36,7 +36,7 @@ func (c insightsConfig) validate() error {
 }
 
 type alertKey struct {
-	source, row, account, definition string
+	source, row string
 }
 
 type insights struct {
@@ -61,12 +61,6 @@ func (s *insights) observe(c config, snapshot quotaSnapshot) ([]string, error) {
 		for _, g := range snapshot.Groups {
 			for _, r := range g.Rows {
 				key := alertKey{source: g.ID, row: r.Key}
-				if g.ID == "opencode" {
-					key.definition = c.OpenCode.ModelRows[r.Key]
-					if key.definition == "" {
-						key.account = c.OpenCode.Account
-					}
-				}
 				was := s.low[key]
 				if r.Percent == nil {
 					next[key] = was

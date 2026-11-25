@@ -54,7 +54,7 @@ func panels(c config) []panel {
 		var on bool
 		switch id {
 		case "claude":
-			p = panel{ID: id, Title: "Claude Code", Unit: "est. used", Keys: c.Claude.Items}
+			p = panel{ID: id, Title: "Claude Code", Unit: "used", Keys: c.Claude.Items}
 			on = c.Claude.Enabled
 		case "codex":
 			p = panel{ID: id, Title: "Codex", Unit: "used", Keys: c.Codex.Items}
@@ -63,7 +63,7 @@ func panels(c config) []panel {
 			p = panel{ID: id, Title: "Antigravity", Unit: "Pool left", Keys: c.Antigravity.Items}
 			on = c.Antigravity.Enabled
 		case "opencode":
-			p = panel{ID: id, Title: "OpenCode Go", Unit: "5h left", Keys: c.OpenCode.Models}
+			p = panel{ID: id, Title: "OpenCode Go", Unit: "left", Keys: c.OpenCode.Items}
 			on = c.OpenCode.Enabled
 		}
 		if on && len(p.Keys) > 0 {
@@ -82,12 +82,12 @@ func rowLabel(p panel, key string) string {
 		return "5h"
 	case "week":
 		return "weekly"
+	case "month":
+		return "monthly"
 	case "primary":
 		return "Primary"
 	case "secondary":
 		return "Secondary"
-	case "@shared":
-		return "shared"
 	}
 	if p.ID == "antigravity" {
 		group, window, _ := strings.Cut(key, ".")
@@ -132,7 +132,8 @@ func resetText(id string, r reading, now time.Time) string {
 		return ""
 	}
 	if r.Reset.IsZero() {
-		if id == "claude" && r.Percent == 0 {
+		// An unused rolling window has no reset until its first request.
+		if (id == "claude" && r.Percent == 0) || (id == "opencode" && r.Percent == 100) {
 			return "starts on next use"
 		}
 		return "reset unknown"

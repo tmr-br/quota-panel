@@ -125,7 +125,7 @@ func doctor(ctx context.Context, c config) error {
 	default:
 		fmt.Println("Observed USB IDs:", strings.Join(ids, ", "))
 	}
-	for _, bin := range []string{"trcc", "npx"} {
+	for _, bin := range []string{"trcc", "sqlite3"} {
 		if path, err := exec.LookPath(bin); err != nil {
 			fmt.Printf("%s: unavailable\n", bin)
 		} else {

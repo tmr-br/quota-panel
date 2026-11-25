@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image/png"
 	"io"
@@ -128,9 +129,16 @@ touch "$QUOTA_PANEL_TEST_DIR/first"
 while [ ! -f "$QUOTA_PANEL_TEST_DIR/continue" ]; do sleep 0.1; done
 echo '{}'
 `
-	if err := os.WriteFile(filepath.Join(root, "npx"), []byte(script), 0755); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "sqlite3"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
+	// Use the real credential reader so the fake sqlite3 is the slow provider.
+	writeFixture(t, filepath.Join(root, "opencode.db"), "")
+	t.Setenv("OPENCODE_DB", filepath.Join(root, "opencode.db"))
+	readOpenCredential = loadOpenCredential
+	defer func() {
+		readOpenCredential = func(context.Context) ([]byte, error) { return nil, errors.New("test: no OpenCode sign-in") }
+	}()
 	const key = "0416:5408@1-2"
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
@@ -263,68 +271,6 @@ func TestHeadlessPublishesWithoutContactingTrcc(t *testing.T) {
 	}, true)
 	if err != nil || calls != 1 {
 		t.Fatalf("observer calls=%d error=%v", calls, err)
-	}
-}
-
-func TestDaemonRotatesPagesWhileObserverIsBusy(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := os.WriteFile(filepath.Join(root, "npx"), []byte("#!/bin/sh\necho '{}'\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-	defer cancel()
-	images := make(chan []byte, 4)
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/devices":
-			io.WriteString(w, `{"ok":true,"products":[{"key":"0416:5409"}]}`)
-		case "/devices/0416:5409/state":
-			io.WriteString(w, `{"ok":true,"connected":true,"wire":"ly","product":"Trofeo Vision 9.16 LCD","pm_byte":66,"sub_byte":4,"resolution":[1920,462]}`)
-		case "/devices/0416:5409/display/send-image":
-			f, _, err := r.FormFile("image")
-			if err != nil {
-				t.Error(err)
-				return
-			}
-			defer f.Close()
-			b, err := io.ReadAll(f)
-			if err != nil {
-				t.Error(err)
-				return
-			}
-			images <- b
-			io.WriteString(w, `{"ok":true}`)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer s.Close()
-	path := filepath.Join(root, "settings.toml")
-	writeFixture(t, path, fmt.Sprintf("trcc_url=%q\ninterval_seconds=300\ndisplay_order=['opencode']\n[display]\npage_seconds=1\n[opencode]\nmodels=['one','two','three','four','five']\n", s.URL))
-	c, err := readConfig(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- serve(ctx, path, c, func(config, []panel, time.Time) { <-ctx.Done() }, false) }()
-	defer func() {
-		cancel()
-		if err := <-done; err != nil {
-			t.Error(err)
-		}
-	}()
-	var pages [][]byte
-	for len(pages) < 2 {
-		select {
-		case b := <-images:
-			pages = append(pages, b)
-		case <-ctx.Done():
-			t.Fatal("busy observer blocked page rotation")
-		}
-	}
-	if bytes.Equal(pages[0], pages[1]) {
-		t.Fatal("the second upload repeated the first page")
 	}
 }
 

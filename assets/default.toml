@@ -7,6 +7,7 @@ display_order = ["claude", "codex", "antigravity", "opencode"]
 [claude]
 enabled = true
 items = ["5h", "week"]
+usage_api = true
 projects_dir = ""
 five_hour_tokens = 0
 weekly_tokens = 0
@@ -23,10 +24,7 @@ items = ["gemini.5h", "gemini.week", "claude_gpt.5h", "claude_gpt.week"]
 
 [opencode]
 enabled = true
-account = ""
-models = ["glm-5.3-flash", "deepseek-v4.1-flash", "deepseek-v4-pro", "mimo-v2.6-pro"]
-
-[opencode.model_rows]
+items = ["5h", "week", "month"]
 
 [display]
 timezone = ""

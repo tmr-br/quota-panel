@@ -44,7 +44,7 @@ func statusAt(ps []panel, observed, now time.Time, demo bool) quotaSnapshot {
 			v := p.valueAt(key, now)
 			row := quotaRow{Key: key, Name: rowLabel(p, key)}
 			if v.Valid {
-				row.Estimated = v.Estimated || p.ID == "claude"
+				row.Estimated = v.Estimated
 				row.Percent = &v.Percent
 				if !v.Reset.IsZero() {
 					t := v.Reset.UTC()

@@ -1,123 +1,113 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"path/filepath"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestOpenCodeAccountSelection(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "panel.toml")
-	writeFixture(t, path, "[opencode]\naccount='work'\nmodels=['@shared']\n")
-	c, err := readConfig(path)
-	if err != nil || c.OpenCode.Account != "work" {
-		t.Fatal(c.OpenCode.Account, err)
+// Tests never read the real Keychain or OpenCode database, so daemon tests
+// that load the default configuration stay offline.
+func init() {
+	readOpenCredential = func(context.Context) ([]byte, error) { return nil, errors.New("test: no OpenCode sign-in") }
+	readClaudeCredential = func(context.Context) ([]byte, error) { return nil, errors.New("test: no Claude sign-in") }
+}
+
+func openStatus(t *testing.T, raw string) openGoStatus {
+	t.Helper()
+	var s openGoStatus
+	if err := json.Unmarshal([]byte(raw), &s); err != nil {
+		t.Fatal(err)
 	}
-	now := time.Unix(200000, 0)
-	work := `{"id":"opencode-go.five_hour","account":"work","window":"5h","renderType":"percent","resultType":"quota","authority":"provider_reported","percentRemaining":90,"resetAt":200100}`
-	home := `{"id":"opencode-go.five_hour","account":"home","window":"5h","renderType":"percent","resultType":"quota","authority":"provider_reported","percentRemaining":10,"resetAt":200100}`
-	for _, tc := range []struct {
-		name, account, status, entries string
-		want                           float64 // -1 means unavailable.
-	}{
-		{"single", "", "ok", home, 10},
-		{"ambiguous", "", "ok", work + "," + home, -1},
-		{"missing standard authority", "", "ok", strings.Replace(work, `"authority":"provider_reported",`, "", 1), -1},
-		{"unknown standard authority", "", "ok", strings.Replace(work, "provider_reported", "other", 1), -1},
-		{"selected", c.OpenCode.Account, "ok", home + "," + work, 90},
-		{"absent", "home", "ok", work, -1},
-		{"duplicate selected", "work", "ok", work + "," + work, -1},
-		{"failed account unidentifiable", "", "partial", work, -1},
-		{"failed account missing", "home", "partial", work, -1},
-		{"failed account retained in cache", "home", "partial", home + "," + work, -1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			config := c.OpenCode
-			config.Account = tc.account
-			raw := fmt.Sprintf(`{"version":3,"providers":{"opencode-go":{"status":%q,"fetchedAt":200000,"entries":[%s]}}}`, tc.status, tc.entries)
-			values, err := parseOpenCode([]byte(raw), config, now)
-			v := values["@shared"]
-			if tc.want < 0 {
-				if err == nil || v.Valid {
-					t.Fatalf("got %+v, %v", v, err)
-				}
-			} else if err != nil || !v.Valid || v.Percent != tc.want || v.Estimated {
-				t.Fatalf("got %+v, %v", v, err)
-			}
-		})
+	return s
+}
+
+func TestOpenCodeGoRejectsNonNumericAmounts(t *testing.T) {
+	var s openGoStatus
+	if err := json.Unmarshal([]byte(`{"access":{"meters":{"fiveHour":{"limitMicroCents":"x","usedMicroCents":"0"}}}}`), &s); err == nil {
+		t.Fatal("accepted a non-numeric amount")
 	}
 }
 
-func TestOpenCodeCustomProvenanceAndOverage(t *testing.T) {
-	now := time.Unix(200000, 0)
-	config := openConfig{Models: []string{"m"}, ModelRows: map[string]string{"m": "quota-providers.custom.vendor.m"}, Account: "elsewhere"}
-	for _, tc := range []struct {
-		name, authority, remaining string
-		valid, estimated           bool
-		want                       float64
-	}{
-		{"provider overage", "provider_reported", "-5", true, false, -5},
-		{"local estimate", "locally_derived", "100", true, true, 100},
-		{"exhausted", "provider_reported", "0", true, false, 0},
-		{"no authority", "", "50", false, false, 0},
-		{"unknown authority", "unknown", "50", false, false, 0},
-		{"missing quota", "provider_reported", "null", false, false, 0},
-		{"outside range", "provider_reported", "101", false, false, 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			raw := fmt.Sprintf(`{"version":3,"providers":{"quota-providers":{"status":"ok","entries":[{"id":"quota-providers.custom.vendor.m","ownership":"user_configured","authority":%q,"renderType":"percent","resultType":"quota","window":"5h","percentRemaining":%s,"resetAt":200100}]}}}`, tc.authority, tc.remaining)
-			values, err := parseOpenCode([]byte(raw), config, now)
-			v := values["m"]
-			if (err == nil) != tc.valid || v.Valid != tc.valid || v.Estimated != tc.estimated || v.Percent != tc.want {
-				t.Fatalf("got %+v, %v", v, err)
-			}
-		})
-	}
-}
-
-func TestOpenCodePartialCustomSource(t *testing.T) {
-	now := time.Unix(200000, 0)
-	config := openConfig{Models: []string{"m"}, ModelRows: map[string]string{"m": "quota-providers.custom.vendor.m"}}
-	const report = `{"version":3,"providers":{"quota-providers":{"status":"partial","sources":%s,"entries":[{"id":"quota-providers.custom.vendor.m","ownership":"user_configured","authority":"provider_reported","renderType":"percent","resultType":"quota","window":"5h","percentRemaining":37,"resetAt":200100}]}}}`
-	for _, tc := range []struct {
-		sources string
-		valid   bool
-	}{
-		{`[{"id":"other","status":"error"},{"id":"vendor","status":"ok"}]`, true},
-		{`[{"id":"vendor","status":"error"},{"id":"other","status":"ok"}]`, false},
-		{`[]`, false},
-	} {
-		values, err := parseOpenCode([]byte(fmt.Sprintf(report, tc.sources)), config, now)
-		if got := values["m"]; err == nil || got.Valid != tc.valid {
-			t.Fatalf("sources %s: %+v, %v", tc.sources, got, err)
-		}
-	}
-}
-
-func TestOpenCodeCacheExpiryIsIndependentFromReset(t *testing.T) {
-	now := time.Unix(200000, 0)
-	fetchedAt := now.Add(-4*time.Hour - 59*time.Minute)
-	raw := fmt.Sprintf(`{"version":3,"providers":{"opencode-go":{"status":"ok","fetchedAt":%d,"entries":[{"id":"opencode-go.five_hour","window":"5h","renderType":"percent","resultType":"quota","authority":"provider_reported","percentRemaining":67}]}}}`, fetchedAt.Unix())
-	config := openConfig{Models: []string{"@shared"}}
-	values, err := parseOpenCode([]byte(raw), config, now)
+func TestOpenCodeGoMetersBecomeRemainingPercentages(t *testing.T) {
+	now := time.Date(2026, 11, 25, 7, 0, 0, 0, time.UTC)
+	s := openStatus(t, `{"access":{"endsAt":"2026-12-06T08:59:41.000Z","meters":{
+		"fiveHour":{"startsAt":null,"resetsAt":null,"limitMicroCents":"1200000000","usedMicroCents":"0"},
+		"week":{"resetsAt":"2026-11-30T00:00:00.000Z","limitMicroCents":"3000000000","usedMicroCents":"3300000000"},
+		"month":{"limitMicroCents":6000000000,"usedMicroCents":"1500000000"}}}}`)
+	v, err := parseOpenGoStatus(s, openConfig{selection{Items: []string{"5h", "week", "month"}}}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := panel{Keys: config.Models, Values: values}
-	deadline := now.Add(time.Minute)
-	v := p.valueAt("@shared", deadline.Add(-time.Nanosecond))
-	if !v.Valid || !v.Reset.IsZero() || !v.ValidUntil.Equal(deadline) || !v.expiresAt().Equal(deadline) {
-		t.Fatalf("before cache expiry: %+v", v)
+	// An unstarted window is fully available; an overdrawn one is negative;
+	// a month without its own reset uses the plan's end.
+	if !v["5h"].Valid || v["5h"].Percent != 100 || !v["5h"].Reset.IsZero() ||
+		v["week"].Percent > -9.99 || v["week"].Percent < -10.01 ||
+		v["month"].Percent != 75 || !v["month"].Reset.Equal(time.Date(2026, 12, 6, 8, 59, 41, 0, time.UTC)) {
+		t.Fatal(v)
 	}
-	if next := nextExpiration([]panel{p}, now); !next.Equal(deadline) {
-		t.Fatalf("next display update %v, want cache expiry %v", next, deadline)
+}
+
+func TestOpenCodeGoRejectsUnusableMeters(t *testing.T) {
+	now := time.Date(2026, 11, 25, 7, 0, 0, 0, time.UTC)
+	c := openConfig{selection{Items: []string{"5h"}}}
+	for name, raw := range map[string]string{
+		"not subscribed": `{"access":null}`,
+		"missing meter":  `{"access":{"meters":{}}}`,
+		"negative":       `{"access":{"meters":{"fiveHour":{"limitMicroCents":"10","usedMicroCents":"-1"}}}}`,
+		"expired":        `{"access":{"meters":{"fiveHour":{"resetsAt":"2026-11-25T06:00:00Z","limitMicroCents":"10","usedMicroCents":"1"}}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			v, err := parseOpenGoStatus(openStatus(t, raw), c, now)
+			if err == nil || v["5h"].Valid {
+				t.Fatal(v, err)
+			}
+		})
 	}
-	if p.valueAt("@shared", deadline).Valid {
-		t.Fatal("cache valid at expiry")
+}
+
+func TestOpenCodeConsoleRequest(t *testing.T) {
+	now := time.Date(2026, 11, 25, 7, 0, 0, 0, time.UTC)
+	var status int
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/console/api/go/status" || r.Header.Get("Authorization") != "Bearer tok" || r.Header.Get("x-org-id") != "org_1" {
+			t.Errorf("unexpected request %s %v", r.URL, r.Header)
+		}
+		w.WriteHeader(status)
+		fmt.Fprint(w, `{"access":{"meters":{"week":{"resetsAt":"2026-11-30T00:00:00Z","limitMicroCents":"100","usedMicroCents":"25"}}}}`)
+	}))
+	defer srv.Close()
+	oldClient := http.DefaultClient
+	http.DefaultClient = srv.Client()
+	defer func() { http.DefaultClient = oldClient }()
+	old := readOpenCredential
+	defer func() { readOpenCredential = old }()
+	cred := func(expires time.Time) {
+		readOpenCredential = func(context.Context) ([]byte, error) {
+			return []byte(fmt.Sprintf(`{"type":"oauth","access":"tok","refresh":"r","expires":%d,"metadata":{"orgID":"org_1","server":%q}}`, expires.UnixMilli(), srv.URL+"/console")), nil
+		}
 	}
-	if values, err := parseOpenCode([]byte(raw), config, deadline); err == nil || values["@shared"].Valid {
-		t.Fatal("expired cache accepted again", values)
+	c := openConfig{selection{Items: []string{"week"}}}
+
+	cred(now.Add(time.Hour))
+	status = 200
+	if v, err := fetchOpenCode(context.Background(), c, now); err != nil || v["week"].Percent != 75 {
+		t.Fatal(v, err)
+	}
+	for code, want := range map[int]string{401: "401", 404: "subscription", 500: "HTTP 500"} {
+		status = code
+		if _, err := fetchOpenCode(context.Background(), c, now); err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "tok") {
+			t.Fatal(code, err)
+		}
+	}
+	cred(now.Add(-time.Minute))
+	if _, err := fetchOpenCode(context.Background(), c, now); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatal(err)
 	}
 }
