@@ -71,20 +71,20 @@ func writeStatus(w io.Writer, s quotaSnapshot, format string) error {
 		if s.Demo {
 			b.WriteString("DEMO\n")
 		}
-		b.WriteString(s.ObservedAt.Format(time.RFC3339) + "\n")
+		b.WriteString(s.ObservedAt.Format("Jan 2 2006 15:04:05 MST") + "\n")
 		for _, g := range s.Groups {
 			fmt.Fprintf(&b, "%s (%s)\n", g.Title, g.Direction)
 			for _, r := range g.Rows {
-				value := "取得不能"
+				value := "N/A"
 				if r.Percent != nil {
 					value = percentText(*r.Percent) + "%"
 					if r.Estimated {
-						value += " 推定"
+						value += " est."
 					}
 				}
 				fmt.Fprintf(&b, "  %s  %s", r.Name, value)
 				if r.Reset != nil {
-					fmt.Fprintf(&b, "  %s", r.Reset.Format(time.RFC3339))
+					fmt.Fprintf(&b, "  %s", r.Reset.Format("Jan 2 2006 15:04:05 MST"))
 				}
 				b.WriteByte('\n')
 			}

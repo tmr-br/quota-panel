@@ -78,14 +78,14 @@ func (s *insights) observe(c config, snapshot quotaSnapshot) ([]string, error) {
 				}
 				low := remaining <= threshold
 				if low != was {
-					event := "残量低下"
+					event := "Low quota"
 					if !low {
-						event = "残量回復"
+						event = "Quota recovered"
 					}
 					if r.Estimated {
-						event += " (推定)"
+						event += " (est.)"
 					}
-					notices = append(notices, fmt.Sprintf("%s %s/%s 残り %s%%", event, g.Title, r.Name, percentText(remaining)))
+					notices = append(notices, fmt.Sprintf("%s %s/%s %s%% left", event, g.Title, r.Name, percentText(remaining)))
 				}
 				next[key] = low
 			}

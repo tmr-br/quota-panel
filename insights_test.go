@@ -39,7 +39,7 @@ func TestInsightsMissingDemoAndThresholdTransitions(t *testing.T) {
 		return notes
 	}
 	events := observe(3)
-	if !strings.Contains(events[0], "推定") || !strings.Contains(events[0], "12%") || !strings.Contains(events[1], "0%") || !strings.Contains(events[2], "-5%") {
+	if !strings.Contains(events[0], "est.") || !strings.Contains(events[0], "12%") || !strings.Contains(events[1], "0%") || !strings.Contains(events[2], "-5%") {
 		t.Fatal(events)
 	}
 	observe(0)
@@ -51,7 +51,7 @@ func TestInsightsMissingDemoAndThresholdTransitions(t *testing.T) {
 	// A new selected account begins its own alert state, without repeating Claude's.
 	c.OpenCode.Account = "personal"
 	events = observe(1)
-	if !strings.Contains(events[0], "アカウント共通") {
+	if !strings.Contains(events[0], "shared") {
 		t.Fatal(events)
 	}
 	sample.Demo = true
@@ -66,7 +66,7 @@ func TestInsightsMissingDemoAndThresholdTransitions(t *testing.T) {
 	}
 	sample.Demo = false
 	c.Insights.HistoryDir = ""
-	if events = observe(1); !strings.Contains(events[0], "残量回復") {
+	if events = observe(1); !strings.Contains(events[0], "Quota recovered") {
 		t.Fatal(events)
 	}
 	observe(0)
@@ -126,7 +126,7 @@ func TestStatusAndHistoryDistinguishEstimatesExpiryAndZero(t *testing.T) {
 		t.Fatal(prom)
 	}
 	b.Reset()
-	if err := writeStatus(&b, s, "text"); err != nil || !strings.Contains(b.String(), "-5% 推定") || !strings.Contains(b.String(), "取得不能") {
+	if err := writeStatus(&b, s, "text"); err != nil || !strings.Contains(b.String(), "-5% est.") || !strings.Contains(b.String(), "N/A") {
 		t.Fatal(b.String(), err)
 	}
 	p := panel{ID: "claude", Keys: []string{"5h"}, Values: readings{"5h": {Valid: true, Percent: 0, ValidUntil: at.Add(time.Minute)}}}

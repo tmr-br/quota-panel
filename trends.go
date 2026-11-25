@@ -75,7 +75,7 @@ func trendPercent(v float64) string {
 // source/row/direction combinations rather than with the number of polls.
 func writeTrends(ctx context.Context, w io.Writer, c insightsConfig, now time.Time, days int) error {
 	if days < 1 || days > 90 {
-		return errors.New("-trend-days は 1〜90 の整数で指定してください")
+		return errors.New("-trend-days must be an integer from 1 to 90")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -111,14 +111,14 @@ func writeTrends(ctx context.Context, w io.Writer, c insightsConfig, now time.Ti
 		}
 		for _, group := range snap.Groups {
 			if group.Direction != "used" && group.Direction != "remaining" {
-				return fmt.Errorf("履歴の記録方向が不明です (%q, %q)", group.ID, group.Direction)
+				return fmt.Errorf("Unknown history direction (%q, %q)", group.ID, group.Direction)
 			}
 			for _, row := range group.Rows {
 				key := trendKey{source: group.ID, row: row.Key, direction: group.Direction}
 				// Codex uses primary/secondary for different window durations
 				// across plans. Its historical label preserves the reported duration.
 				if group.ID == "codex" && !strings.EqualFold(row.Name, row.Key) {
-					key.window = row.Name
+					key.window = englishWindowLabel(row.Name)
 				}
 				s := series[key]
 				if s == nil {
@@ -151,48 +151,63 @@ func writeTrends(ctx context.Context, w io.Writer, c insightsConfig, now time.Ti
 		return cmp.Or(cmp.Compare(a.source, b.source), cmp.Compare(a.row, b.row), cmp.Compare(a.direction, b.direction), cmp.Compare(a.window, b.window))
 	})
 	out := bufio.NewWriter(w)
-	fmt.Fprintf(out, "残量の記録値　%s 00:00 UTC ～ %s UTC\n", historyCutoff(now, c.RetentionDays), now.UTC().Format("2006-01-02 15:04:05"))
-	fmt.Fprintln(out, "アカウントを切り替えた場合、同じ項目には切り替え前後の記録値が含まれます。")
+	fmt.Fprintf(out, "Recorded quota left  %s 00:00 UTC to %s UTC\n", now.UTC().AddDate(0, 0, 1-c.RetentionDays).Format("Jan 2 2006"), now.UTC().Format("Jan 2 2006 15:04:05"))
+	fmt.Fprintln(out, "Records may include multiple accounts if you switched accounts.")
 	if len(keys) == 0 {
-		fmt.Fprintln(out, "対象期間の記録はありません。")
+		fmt.Fprintln(out, "No records in this period.")
 	}
 	for _, k := range keys {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		s := series[k]
-		direction := "残量"
+		direction := "left"
 		if k.direction == "used" {
-			direction = "使用率から換算（100% − 使用率）"
+			direction = "used converted to left (100% - used)"
 		}
-		fmt.Fprintf(out, "\n%q / %q　%s", k.source, k.row, direction)
+		fmt.Fprintf(out, "\n%q / %q  %s", k.source, k.row, direction)
 		if k.source == "codex" {
 			period := k.window
 			if period == "" {
-				period = "期間不明"
+				period = "window unknown"
 			}
-			fmt.Fprintf(out, "　%q", period)
+			fmt.Fprintf(out, "  %q", period)
 		}
 		fmt.Fprintln(out)
-		fmt.Fprintf(out, "  有効 %d件　取得不能 %d件\n", s.reported.count+s.estimated.count, s.missing)
+		fmt.Fprintf(out, "  Valid: %d  N/A: %d\n", s.reported.count+s.estimated.count, s.missing)
 		for _, r := range []struct {
 			label  string
 			values trendRange
-		}{{"実測", s.reported}, {"推定", s.estimated}} {
+		}{{"reported", s.reported}, {"est.", s.estimated}} {
 			if r.values.count > 0 {
-				fmt.Fprintf(out, "  %s %d件　最小残量 %s%%　最大残量 %s%%\n", r.label, r.values.count, trendPercent(r.values.min), trendPercent(r.values.max))
+				fmt.Fprintf(out, "  %s %d  min left %s%%  max left %s%%\n", r.label, r.values.count, trendPercent(r.values.min), trendPercent(r.values.max))
 			}
 		}
-		state := "取得不能"
+		state := "N/A"
 		if s.conflict {
-			state = "同時刻の記録が不一致"
+			state = "Conflicting records at the same time"
 		} else if v := s.lastValue; v.available {
-			state = "残量 " + trendPercent(v.remaining) + "%（実測）"
+			state = trendPercent(v.remaining) + "% left (reported)"
 			if v.estimated {
-				state = "残量 " + trendPercent(v.remaining) + "%（推定）"
+				state = trendPercent(v.remaining) + "% left (est.)"
 			}
 		}
-		fmt.Fprintf(out, "  最終記録 %s　%s\n", s.last.UTC().Format(time.RFC3339Nano), state)
+		fmt.Fprintf(out, "  Last record %s  %s\n", s.last.UTC().Format("Jan 2 2006 15:04:05.999999999 UTC"), state)
 	}
 	return out.Flush()
+}
+
+// Normalize legacy Codex window labels without changing stored history.
+func englishWindowLabel(label string) string {
+	if label == "週間枠" {
+		return "weekly"
+	}
+	for _, suffix := range []struct{ old, new string }{{"時間枠", "h"}, {"分枠", "m"}} {
+		if n, ok := strings.CutSuffix(label, suffix.old); ok {
+			if _, err := strconv.Atoi(n); err == nil {
+				return n + suffix.new
+			}
+		}
+	}
+	return label
 }

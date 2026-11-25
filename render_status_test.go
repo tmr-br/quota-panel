@@ -33,7 +33,7 @@ func TestFrameDistinguishesUnavailableFromMeasuredZero(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const missing = "取得不能"
+	const missing = "N/A"
 	x0, x1 := 28, 480+28
 	end2, end3 := 3*480-28, 4*480-28
 	for _, tc := range []struct {

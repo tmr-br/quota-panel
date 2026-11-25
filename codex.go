@@ -121,11 +121,11 @@ func fetchCodex(ctx context.Context, c codexConfig, cache logCache[codexEvent], 
 		r := reading{Valid: true, Percent: *w.Used, Reset: time.Unix(*w.Reset, 0)}
 		switch {
 		case w.Minutes == 10080:
-			r.Label = "週間枠"
+			r.Label = "weekly"
 		case w.Minutes > 0 && w.Minutes%60 == 0:
-			r.Label = fmt.Sprintf("%d時間枠", w.Minutes/60)
+			r.Label = fmt.Sprintf("%dh", w.Minutes/60)
 		case w.Minutes > 0:
-			r.Label = fmt.Sprintf("%d分枠", w.Minutes)
+			r.Label = fmt.Sprintf("%dm", w.Minutes)
 		}
 		out[k] = r
 	}

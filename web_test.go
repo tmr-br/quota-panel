@@ -46,7 +46,7 @@ func TestDashboardServesTheSameSnapshotInEachFormat(t *testing.T) {
 	ps := []panel{{ID: "codex", Title: "Codex", Keys: rows, Values: values}}
 	d.publish(ps, at, displayConfig{}, false)
 	html, header := get("GET", "/", 200)
-	if !strings.Contains(header.Get("Content-Type"), "text/html") || !bytes.Contains(html, []byte(">0%<")) || bytes.Count(html, []byte("取得不能")) != 4 {
+	if !strings.Contains(header.Get("Content-Type"), "text/html") || !bytes.Contains(html, []byte(">0%<")) || bytes.Count(html, []byte("N/A")) != 4 {
 		t.Fatal("HTML did not distinguish zero from missing and expired data")
 	}
 	api, _ := get("GET", "/api/status", 200)
@@ -69,7 +69,7 @@ func TestDashboardServesTheSameSnapshotInEachFormat(t *testing.T) {
 	if err := writeStatus(&text, snap, "text"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(text.String(), "zero  0%") || strings.Count(text.String(), "取得不能") != 4 {
+	if !strings.Contains(text.String(), "zero  0%") || strings.Count(text.String(), "N/A") != 4 {
 		t.Fatal("text output did not distinguish measured zero and unavailable data")
 	}
 	first, _ := get("GET", "/panel.png", 200)

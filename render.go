@@ -147,7 +147,7 @@ func (r renderer) frame(ps []panel, now time.Time, demo bool, page uint64) ([]by
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 	fill(img, 0, 0, width, height, r.paint(background))
 	if len(ps) == 0 {
-		label(img, px(48), height/2+px(14), "表示対象がありません", r.faces[36], r.paint(muted))
+		label(img, px(48), height/2+px(14), "Nothing to display", r.faces[36], r.paint(muted))
 	}
 	for i, p := range ps {
 		left, right := i*width/len(ps), (i+1)*width/len(ps)
@@ -219,7 +219,7 @@ func (r renderer) largeRow(img draw.Image, p panel, k string, x, end, y int, now
 	v := p.valueAt(k, now)
 	label(img, x, y+px(30), fit(displayLabel(p, k), r.faces[25], end-x), r.faces[25], r.paint(ink))
 	if !v.Valid {
-		label(img, x, y+px(98), "取得不能", r.faces[36], r.paint(muted))
+		label(img, x, y+px(98), "N/A", r.faces[36], r.paint(muted))
 		return
 	}
 	s := percentText(v.Percent)
@@ -232,7 +232,7 @@ func (r renderer) largeRow(img draw.Image, p panel, k string, x, end, y int, now
 func (r renderer) smallRow(img draw.Image, p panel, k string, x, end, y int, now time.Time) {
 	px := r.px
 	v := p.valueAt(k, now)
-	value := "取得不能"
+	value := "N/A"
 	face := r.faces[22]
 	c := r.paint(muted)
 	if v.Valid {
@@ -255,7 +255,7 @@ func (r renderer) smallRow(img draw.Image, p panel, k string, x, end, y int, now
 func displayLabel(p panel, k string) string {
 	name := rowLabel(p, k)
 	if p.Values[k].Estimated && p.ID != "claude" {
-		return "推定 · " + name
+		return "est. · " + name
 	}
 	return name
 }

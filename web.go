@@ -52,7 +52,7 @@ var dashboardHTML string
 var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
 	"percentage": func(v *float64) string {
 		if v == nil {
-			return "取得不能"
+			return "N/A"
 		}
 		return percentText(*v) + "%"
 	},
@@ -63,7 +63,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		return min(100, max(0, *v))
 	},
 	"known": func(v *float64) bool { return v != nil },
-	"date":  func(t time.Time, loc *time.Location) string { return t.In(loc).Format("2006-01-02 15:04 MST") },
+	"date":  func(t time.Time, loc *time.Location) string { return t.In(loc).Format("Jan 2 15:04 MST") },
 }).Parse(dashboardHTML))
 
 func (d *dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -96,7 +96,7 @@ func (d *dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if path == "/" {
 			w.Header().Set("Refresh", "2")
 		}
-		http.Error(w, "データを取得中です", 503)
+		http.Error(w, "Loading...", 503)
 		return
 	}
 	now := time.Now()

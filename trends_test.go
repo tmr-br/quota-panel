@@ -42,7 +42,7 @@ func TestTrendsHistoryBoundariesDirectionsAndMissingValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := out.String()
-	for _, want := range []string{"2026-11-23 00:00 UTC", "アカウント", `"codex" / "missing"　使用率`, "有効 0件　取得不能 1件", `"codex" / "primary"　残量`, "実測 1件　最小残量 20%　最大残量 20%", "有効 4件　取得不能 2件", "実測 3件　最小残量 -8%　最大残量 0%", "推定 1件　最小残量 80%　最大残量 80%", "最終記録 2026-11-23T00:15:00Z　取得不能"} {
+	for _, want := range []string{"Nov 23 2026 00:00 UTC", "multiple accounts", `"codex" / "missing"  used converted to left`, "Valid: 0  N/A: 1", `"codex" / "primary"  left`, "reported 1  min left 20%  max left 20%", "Valid: 4  N/A: 2", "reported 3  min left -8%  max left 0%", "est. 1  min left 80%  max left 80%", "Last record Nov 23 2026 00:15:00 UTC  N/A"} {
 		if !strings.Contains(report, want) {
 			t.Errorf("missing %q in\n%s", want, report)
 		}
@@ -91,7 +91,7 @@ func TestTrendsEmptyRangeErrorsAndCancellation(t *testing.T) {
 		}
 	}
 	var out bytes.Buffer
-	if err := writeTrends(context.Background(), &out, cfg, now, 90); err != nil || !strings.Contains(out.String(), "2026-11-22 00:00 UTC") || !strings.Contains(out.String(), "対象期間の記録はありません") {
+	if err := writeTrends(context.Background(), &out, cfg, now, 90); err != nil || !strings.Contains(out.String(), "Nov 22 2026 00:00 UTC") || !strings.Contains(out.String(), "No records in this period") {
 		t.Fatal(out.String(), err)
 	}
 	if err := writeTrends(context.Background(), failingTrendWriter{}, cfg, now, 1); !errors.Is(err, io.ErrClosedPipe) {
@@ -126,7 +126,7 @@ func TestTrendsSeparatesCodexWindowChanges(t *testing.T) {
 	if err := writeTrends(context.Background(), &b, cfg, now, 2); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"\"5時間枠\"\n  有効 1件　取得不能 0件\n  実測 1件　最小残量 90%", "\"週間枠\"\n  有効 1件　取得不能 0件\n  実測 1件　最小残量 10%", "\"期間不明\"\n  有効 0件　取得不能 1件"} {
+	for _, want := range []string{"\"5h\"\n  Valid: 1  N/A: 0\n  reported 1  min left 90%", "\"weekly\"\n  Valid: 1  N/A: 0\n  reported 1  min left 10%", "\"window unknown\"\n  Valid: 0  N/A: 1"} {
 		if !strings.Contains(b.String(), want) {
 			t.Errorf("missing %q in %s", want, b.String())
 		}
