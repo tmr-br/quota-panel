@@ -1,0 +1,8 @@
+# Local build outputs
+/trofeo-quota
+/quota-panel
+
+# Generated preview images
+/demo-en.png
+/quota-en.png
+/quota-live*.png
