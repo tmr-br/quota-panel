@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -262,5 +263,31 @@ esac`, os.Getpid()))
 	v, err = fetchRPC(context.Background(), keys, now)
 	if err == nil || v[keys[0]].Valid || len(calls) != 2 {
 		t.Fatal("accepted a different executable", v, err)
+	}
+}
+
+func TestAntigravityFullQuotaWithUnsetReset(t *testing.T) {
+	now := time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, bucket string
+		valid        bool
+	}{
+		{"full CLI", `{"id":"3p-weekly","remaining_fraction":1,"reset_time":"1970-01-01T00:00:00Z"}`, true},
+		{"full RPC", `{"bucketId":"3p-5h","remainingFraction":1,"resetTime":"1970-01-01T00:00:00Z"}`, true},
+		{"partial epoch", `{"id":"3p-weekly","remaining_fraction":0.5,"reset_time":"1970-01-01T00:00:00Z"}`, false},
+		{"expired full", `{"id":"3p-weekly","remaining_fraction":1,"reset_time":"2026-11-25T00:00:00Z"}`, false},
+		{"disabled", `{"id":"3p-weekly","disabled":true,"remaining_fraction":1,"reset_time":"1970-01-01T00:00:00Z"}`, false},
+		{"missing reset", `{"id":"3p-weekly","remaining_fraction":1}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var b agBucket
+			if err := json.Unmarshal([]byte(tc.bucket), &b); err != nil {
+				t.Fatal(err)
+			}
+			got := b.read(now)
+			if got.Valid != tc.valid || (tc.valid && (got.Percent != 100 || !got.Reset.IsZero())) {
+				t.Fatalf("unexpected reading: %+v", got)
+			}
+		})
 	}
 }

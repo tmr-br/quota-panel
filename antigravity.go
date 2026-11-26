@@ -151,7 +151,15 @@ func (b agBucket) read(now time.Time) reading {
 		at = b.CLIReset
 	}
 	reset, err := time.Parse(time.RFC3339Nano, at)
-	if err != nil || !reset.After(now) || p == nil {
+	if err != nil || p == nil {
+		return reading{}
+	}
+	// agy can report a completely unused bucket with the Unix epoch as
+	// its unset reset time. Preserve the measured balance, not a fake date.
+	if *p == 1 && reset.Equal(time.Unix(0, 0)) {
+		return measured(100, time.Time{})
+	}
+	if !reset.After(now) {
 		return reading{}
 	}
 	return measured(*p*100, reset)
